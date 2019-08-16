@@ -1,241 +1,141 @@
 """Show connections settings sub window."""
 import logging
-import PyQt5
-
-from scctool.view.widgets import MonitoredLineEdit, FTPsetup, Completer, HotkeyLayout
-
-import scctool.settings
-import base64
-import mykeyboard
 import weakref
 
+from PyQt5.QtCore import QPoint, QSize, Qt
+from PyQt5.QtGui import QIcon, QKeySequence
+from PyQt5.QtWidgets import (QBoxLayout, QCheckBox, QFormLayout, QGroupBox,
+                             QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                             QPushButton, QScrollArea, QShortcut, QSizePolicy,
+                             QSpacerItem, QTabWidget, QVBoxLayout, QWidget)
+
+import scctool.settings
+import scctool.settings.translation
+from scctool.view.widgets import Completer, MonitoredLineEdit
+
 # create logger
-module_logger = logging.getLogger('scctool.view.subConnections')
+module_logger = logging.getLogger(__name__)
+_ = scctool.settings.translation.gettext
 
 
-class SubwindowConnections(PyQt5.QtWidgets.QWidget):
+class SubwindowConnections(QWidget):
     """Show connections settings sub window."""
 
-    def createWindow(self, mainWindow):
+    current_tab = -1
+
+    def createWindow(self, mainWindow, tab=''):
         """Create window."""
         try:
             parent = None
-            super(SubwindowConnections, self).__init__(parent)
-            # self.setWindowFlags(PyQt5.QtCore.Qt.WindowStaysOnTopHint)
+            super().__init__(parent)
+            # self.setWindowFlags(Qt.WindowStaysOnTopHint)
 
             self.setWindowIcon(
-                PyQt5.QtGui.QIcon(scctool.settings.getAbsPath('src/connection.png')))
-            self.setWindowModality(PyQt5.QtCore.Qt.ApplicationModal)
+                QIcon(scctool.settings.getResFile('twitch.png')))
+            self.setWindowModality(Qt.ApplicationModal)
             self.mainWindow = mainWindow
             self.passEvent = False
             self.controller = mainWindow.controller
             self.__dataChanged = False
 
             self.createButtonGroup()
-            self.createTabs()
+            self.createTabs(tab)
 
-            mainLayout = PyQt5.QtWidgets.QVBoxLayout()
+            mainLayout = QVBoxLayout()
 
             mainLayout.addWidget(self.tabs)
             mainLayout.addLayout(self.buttonGroup)
 
             self.setLayout(mainLayout)
 
-            self.resize(PyQt5.QtCore.QSize(mainWindow.size().width()
-                                           * 0.8, self.sizeHint().height()))
-            relativeChange = PyQt5.QtCore.QPoint(mainWindow.size().width() / 2,
-                                                 mainWindow.size().height() / 3) -\
-                PyQt5.QtCore.QPoint(self.size().width() / 2,
-                                    self.size().height() / 3)
+            self.resize(QSize(mainWindow.size().width() * 0.8,
+                              self.sizeHint().height()))
+            relativeChange = QPoint(mainWindow.size().width() / 2,
+                                    mainWindow.size().height() / 3) -\
+                QPoint(self.size().width() / 2,
+                       self.size().height() / 3)
             self.move(mainWindow.pos() + relativeChange)
 
-            self.setWindowTitle(_("Connections"))
+            self.setWindowTitle(_("Twitch & Nightbot Connections"))
 
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
 
-    def createTabs(self):
+    def createTabs(self, tab=''):
         """Create tabs."""
-        self.tabs = PyQt5.QtWidgets.QTabWidget()
+        self.tabs = QTabWidget()
 
-        self.createFormGroupFTP()
-        self.createFormGroupWebsocket()
         self.createFormGroupTwitch()
         self.createFormGroupNightbot()
 
         # Add tabs
-        self.tabs.addTab(self.formGroupWebsocket, _("Intros && Hotkeys"))
-        self.tabs.addTab(self.formGroupTwitch, _("Twitch"))
-        self.tabs.addTab(self.formGroupNightbot, _("Nightbot"))
-        self.tabs.addTab(self.formGroupFTP, _("FTP"))
+        self.tabs.addTab(self.formGroupTwitch, QIcon(
+            scctool.settings.getResFile('twitch.png')), _("Twitch"))
+        self.tabs.addTab(self.formGroupNightbot, QIcon(
+            scctool.settings.getResFile('nightbot.ico')), _("Nightbot"))
 
-    def createFormGroupFTP(self):
-        """Create form group for FTP."""
-        self.formGroupFTP = PyQt5.QtWidgets.QWidget()
-        layout = PyQt5.QtWidgets.QFormLayout()
+        table = dict()
+        table['twitch'] = 0
+        table['nightbot'] = 1
+        self.tabs.setCurrentIndex(
+            table.get(tab, self.current_tab))
+        self.tabs.currentChanged.connect(self.tabChanged)
 
-        self.ftpServer = MonitoredLineEdit()
-        self.ftpServer.textModified.connect(self.changed)
-        self.ftpServer.setText(
-            scctool.settings.config.parser.get("FTP", "server").strip())
-        self.ftpServer.setAlignment(PyQt5.QtCore.Qt.AlignCenter)
-        self.ftpServer.setPlaceholderText(_("FTP server address"))
-        self.ftpServer.setToolTip('')
-        layout.addRow(PyQt5.QtWidgets.QLabel(_("Host:")), self.ftpServer)
-
-        self.ftpUser = MonitoredLineEdit()
-        self.ftpUser.textModified.connect(self.changed)
-        self.ftpUser.setText(
-            scctool.settings.config.parser.get("FTP", "user").strip())
-        self.ftpUser.setAlignment(PyQt5.QtCore.Qt.AlignCenter)
-        self.ftpUser.setPlaceholderText(_("FTP username"))
-        self.ftpUser.setToolTip('')
-        layout.addRow(PyQt5.QtWidgets.QLabel(_("Username:")), self.ftpUser)
-
-        self.ftpPwd = MonitoredLineEdit()
-        self.ftpPwd.textModified.connect(self.changed)
-        self.ftpPwd.setText(base64.b64decode(scctool.settings.config.parser.get(
-            "FTP", "passwd").strip().encode()).decode("utf8"))
-        self.ftpPwd.setAlignment(PyQt5.QtCore.Qt.AlignCenter)
-        self.ftpPwd.setPlaceholderText(_("FTP password"))
-        self.ftpPwd.setToolTip('')
-        self.ftpPwd.setEchoMode(PyQt5.QtWidgets.QLineEdit.Password)
-        label = PyQt5.QtWidgets.QLabel(_("Password:"))
-        # label.setFixedWidth(100)
-        layout.addRow(label, self.ftpPwd)
-
-        self.ftpDir = MonitoredLineEdit()
-        self.ftpDir.textModified.connect(self.changed)
-        self.ftpDir.setText(
-            scctool.settings.config.parser.get("FTP", "dir").strip())
-        self.ftpDir.setAlignment(PyQt5.QtCore.Qt.AlignCenter)
-        self.ftpDir.setPlaceholderText(_("currently using root directory"))
-        self.ftpDir.setToolTip('')
-        layout.addRow(PyQt5.QtWidgets.QLabel(_("Directory:")), self.ftpDir)
-
-        container = PyQt5.QtWidgets.QHBoxLayout()
-        self.pb_testFTP = PyQt5.QtWidgets.QPushButton(
-            _('Test && Setup FTP server'))
-        self.pb_testFTP.clicked.connect(self.testFTP)
-        container.addWidget(self.pb_testFTP)
-
-        layout.addRow(PyQt5.QtWidgets.QLabel(""), container)
-
-        self.formGroupFTP.setLayout(layout)
-
-    def testFTP(self):
-        """Test FTP settings."""
-        self.saveFtpData()
-        FTPsetup(self.controller, self.mainWindow)
-
-    def addHotkey(self, ident, label):
-        element = HotkeyLayout(
-            self, label,
-            scctool.settings.config.parser.get("Intros", ident))
-        self.hotkeys[ident] = element
-        return element
-
-    def connectHotkeys(self):
-        for ident, key in self.hotkeys.items():
-            for ident2, key2 in self.hotkeys.items():
-                if ident == ident2:
-                    continue
-                key.modified.connect(key2.check_dublicate)
-            key.modified.connect(self.changed)
-
-    def createFormGroupWebsocket(self):
-        """Create forms for OBS websocket connection."""
-        self.formGroupWebsocket = PyQt5.QtWidgets.QWidget()
-        mainLayout = PyQt5.QtWidgets.QVBoxLayout()
-
-        self.hotkeyBox = PyQt5.QtWidgets.QGroupBox(_("Intro Hotkeys"))
-        layout = PyQt5.QtWidgets.QVBoxLayout()
-
-        mykeyboard.unhook_all()
-        self.hotkeys = dict()
-        layout.addLayout(self.addHotkey("hotkey_player1", _("Player 1")))
-        layout.addLayout(self.addHotkey("hotkey_player2", _("Player 2")))
-        layout.addLayout(self.addHotkey("hotkey_debug", _("Debug")))
-        self.connectHotkeys()
-        self.hotkeyBox.setLayout(layout)
-        mainLayout.addWidget(self.hotkeyBox)
-
-        self.introBox = PyQt5.QtWidgets.QGroupBox(_("Intro Settings"))
-        layout = PyQt5.QtWidgets.QFormLayout()
-        self.sl_sound = PyQt5.QtWidgets.QSlider(PyQt5.QtCore.Qt.Horizontal)
-        self.sl_sound.setMinimum(0)
-        self.sl_sound.setMaximum(10)
-        self.sl_sound.setValue(
-            scctool.settings.config.parser.getint("Intros", "sound_volume"))
-        self.sl_sound.setTickPosition(PyQt5.QtWidgets.QSlider.TicksBothSides)
-        self.sl_sound.setTickInterval(1)
-        self.sl_sound.valueChanged.connect(self.changed)
-        layout.addRow(PyQt5.QtWidgets.QLabel(
-            _("Sound Volume:") + " "), self.sl_sound)
-        self.sb_displaytime = PyQt5.QtWidgets.QDoubleSpinBox()
-        self.sb_displaytime.setRange(0, 10)
-        self.sb_displaytime.setDecimals(1)
-        self.sb_displaytime.setValue(
-            scctool.settings.config.parser.getfloat("Intros", "display_time"))
-        self.sb_displaytime.setSuffix(" " + _("Seconds"))
-        self.sb_displaytime.valueChanged.connect(self.changed)
-        layout.addRow(PyQt5.QtWidgets.QLabel(
-            _("Display Duration:") + " "), self.sb_displaytime)
-        self.introBox.setLayout(layout)
-        mainLayout.addWidget(self.introBox)
-
-        mainLayout.addItem(PyQt5.QtWidgets.QSpacerItem(
-            0, 0, PyQt5.QtWidgets.QSizePolicy.Minimum, PyQt5.QtWidgets.QSizePolicy.Expanding))
-        self.formGroupWebsocket.setLayout(mainLayout)
+    @classmethod
+    def tabChanged(cls, idx):
+        """Save current tab index."""
+        cls.current_tab = idx
 
     def createFormGroupTwitch(self):
         """Create forms for twitch."""
-        self.formGroupTwitch = PyQt5.QtWidgets.QWidget()
-        layout = PyQt5.QtWidgets.QFormLayout()
+        self.formGroupTwitch = QWidget()
+        layout = QFormLayout()
 
         self.twitchChannel = MonitoredLineEdit()
         self.twitchChannel.textModified.connect(self.changed)
         self.twitchChannel.setText(
             scctool.settings.config.parser.get("Twitch", "channel"))
-        self.twitchChannel.setAlignment(PyQt5.QtCore.Qt.AlignCenter)
+        self.twitchChannel.setAlignment(Qt.AlignCenter)
         self.twitchChannel.setPlaceholderText(
             _("Name of the Twitch channel that should be updated"))
         self.twitchChannel.setToolTip(
-            _('The connected twitch user needs to have editor rights for this channel.'))
-        layout.addRow(PyQt5.QtWidgets.QLabel(
+            _('The connected twitch user needs to have editor'
+              ' rights for this channel.'))
+        layout.addRow(QLabel(
             "Twitch-Channel:"), self.twitchChannel)
 
-        container = PyQt5.QtWidgets.QHBoxLayout()
+        container = QHBoxLayout()
 
         self.twitchToken = MonitoredLineEdit()
         self.twitchToken.textModified.connect(self.changed)
         self.twitchToken.setText(
             scctool.settings.config.parser.get("Twitch", "oauth"))
-        self.twitchToken.setAlignment(PyQt5.QtCore.Qt.AlignCenter)
+        self.twitchToken.setAlignment(Qt.AlignCenter)
         self.twitchToken.setPlaceholderText(
             _("Press 'Get' to generate a token"))
-        self.twitchToken.setEchoMode(PyQt5.QtWidgets.QLineEdit.Password)
+        self.twitchToken.setEchoMode(QLineEdit.Password)
         self.twitchToken.setToolTip(_("Press 'Get' to generate a new token."))
         container.addWidget(self.twitchToken)
 
-        self.pb_getTwitch = PyQt5.QtWidgets.QPushButton(_('Get'))
+        self.pb_getTwitch = QPushButton(_('Get'))
         self.pb_getTwitch.setFixedWidth(100)
-        self.pb_getTwitch.clicked.connect(self.controller.getTwitchToken)
+        self.pb_getTwitch.clicked.connect(
+            lambda: self.controller.authThread.requestToken('twitch'))
         container.addWidget(self.pb_getTwitch)
 
-        layout.addRow(PyQt5.QtWidgets.QLabel(_("Access-Token:")), container)
+        layout.addRow(QLabel(_("Access-Token:")), container)
 
-        container = PyQt5.QtWidgets.QHBoxLayout()
+        container = QHBoxLayout()
 
         self.twitchTemplate = MonitoredLineEdit()
         self.twitchTemplate.textModified.connect(self.changed)
         self.twitchTemplate.setText(
             scctool.settings.config.parser.get("Twitch", "title_template"))
-        self.twitchTemplate.setAlignment(PyQt5.QtCore.Qt.AlignCenter)
+        self.twitchTemplate.setAlignment(Qt.AlignCenter)
         self.twitchTemplate.setPlaceholderText("(League) – (Team1) vs (Team2)")
         self.twitchTemplate.setToolTip(
-            _('Available placeholders:') + " " +
-            ', '.join(self.controller.placeholders.available()))
+            _('Available placeholders:') + " "
+            + ', '.join(self.controller.placeholders.available()))
 
         completer = Completer(
             self.controller.placeholders.available(), self.twitchTemplate)
@@ -244,38 +144,54 @@ class SubwindowConnections(PyQt5.QtWidgets.QWidget):
 
         container.addWidget(self.twitchTemplate)
 
-        button = PyQt5.QtWidgets.QPushButton(_('Test'))
+        button = QPushButton(_('Test'))
         button.setFixedWidth(100)
         button.clicked.connect(
             lambda: self.testPlaceholder(self.twitchTemplate.text()))
         container.addWidget(button)
 
-        label = PyQt5.QtWidgets.QLabel(_("Title Template:"))
+        label = QLabel(_("Title Template:"))
         label.setFixedWidth(100)
         layout.addRow(label, container)
+
+        container = QVBoxLayout()
+
+        self.cb_set_game = QCheckBox(_("Set Game to 'StarCraft II'"))
+        self.cb_set_game.setChecked(
+            scctool.settings.config.parser.getboolean("Twitch", "set_game"))
+        self.cb_set_game.stateChanged.connect(self.changed)
+        container.addWidget(self.cb_set_game)
+
+        label = QLabel(_("Options:") + " ")
+        label.setMinimumWidth(120)
+        layout.addRow(label, container)
+
+        layout.addItem(QSpacerItem(
+            0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
 
         self.formGroupTwitch.setLayout(layout)
 
     def createFormGroupNightbot(self):
         """Create forms for nightbot."""
-        self.formGroupNightbot = PyQt5.QtWidgets.QWidget()
-        mainLayout = PyQt5.QtWidgets.QVBoxLayout()
-        tokenBox = PyQt5.QtWidgets.QGroupBox("Access-Token")
-        container = PyQt5.QtWidgets.QHBoxLayout()
+        self.formGroupNightbot = QWidget()
+        mainLayout = QVBoxLayout()
+        tokenBox = QGroupBox("Access-Token")
+        container = QHBoxLayout()
 
         self.nightbotToken = MonitoredLineEdit()
         self.nightbotToken.textModified.connect(self.changed)
         self.nightbotToken.setText(
             scctool.settings.config.parser.get("Nightbot", "token"))
-        self.nightbotToken.setAlignment(PyQt5.QtCore.Qt.AlignCenter)
-        self.nightbotToken.setEchoMode(PyQt5.QtWidgets.QLineEdit.Password)
+        self.nightbotToken.setAlignment(Qt.AlignCenter)
+        self.nightbotToken.setEchoMode(QLineEdit.Password)
         self.nightbotToken.setPlaceholderText(
             _("Press 'Get' to generate a token"))
         self.nightbotToken.setToolTip(
             _("Press 'Get' to generate a token."))
         container.addWidget(self.nightbotToken)
-        self.pb_getNightbot = PyQt5.QtWidgets.QPushButton(_('Get'))
-        self.pb_getNightbot.clicked.connect(self.controller.getNightbotToken)
+        self.pb_getNightbot = QPushButton(_('Get'))
+        self.pb_getNightbot.clicked.connect(
+            lambda: self.controller.authThread.requestToken('nightbot'))
         self.pb_getNightbot.setFixedWidth(100)
         # self.pb_getNightbot.setEnabled(False)
         container.addWidget(self.pb_getNightbot)
@@ -285,29 +201,29 @@ class SubwindowConnections(PyQt5.QtWidgets.QWidget):
         mainLayout.addWidget(tokenBox, 0)
 
         # scroll area widget contents - layout
-        self.scrollLayout = PyQt5.QtWidgets.QVBoxLayout()
-        self.scrollLayout.setDirection(PyQt5.QtWidgets.QBoxLayout.BottomToTop)
+        self.scrollLayout = QVBoxLayout()
+        self.scrollLayout.setDirection(QBoxLayout.BottomToTop)
         self.scrollLayout.addStretch(0)
-        buttonLayout = PyQt5.QtWidgets.QHBoxLayout()
+        buttonLayout = QHBoxLayout()
         buttonLayout.addStretch(0)
         self.scrollLayout.addLayout(buttonLayout)
 
         # scroll area widget contents
-        self.scrollWidget = PyQt5.QtWidgets.QWidget()
+        self.scrollWidget = QWidget()
         self.scrollWidget.setLayout(self.scrollLayout)
 
         # scroll area
-        self.scrollArea = PyQt5.QtWidgets.QScrollArea()
+        self.scrollArea = QScrollArea()
         self.scrollArea.setWidgetResizable(True)
         self.scrollArea.setWidget(self.scrollWidget)
         self.scrollArea.setFixedHeight(180)
 
         mainLayout.addWidget(self.scrollArea, 1)
 
-        layout = PyQt5.QtWidgets.QHBoxLayout()
-        layout.addWidget(PyQt5.QtWidgets.QLabel(""))
-        addButton = PyQt5.QtWidgets.QPushButton(_('Add Command'))
-        addButton.clicked.connect(lambda: self.addCommand())
+        layout = QHBoxLayout()
+        layout.addWidget(QLabel(""))
+        addButton = QPushButton(_('Add Command'))
+        addButton.clicked.connect(self.addCommand)
         layout.addWidget(addButton)
 
         mainLayout.addLayout(layout, 0)
@@ -320,9 +236,13 @@ class SubwindowConnections(PyQt5.QtWidgets.QWidget):
             for cmd, msg in data.items():
                 self.addCommand(cmd, msg)
 
+        mainLayout.addItem(QSpacerItem(
+            0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
+
         self.formGroupNightbot.setLayout(mainLayout)
 
     def addCommand(self, cmd="", msg=""):
+        """Add a nightbot command."""
         if msg != "__DELETE__":
             dropbox = CommandDropBox(self.controller, cmd=cmd, msg=msg)
             dropbox.connect(self.changed)
@@ -333,20 +253,24 @@ class SubwindowConnections(PyQt5.QtWidgets.QWidget):
     def createButtonGroup(self):
         """Create buttons."""
         try:
-            layout = PyQt5.QtWidgets.QHBoxLayout()
+            layout = QHBoxLayout()
 
-            layout.addWidget(PyQt5.QtWidgets.QLabel(""))
+            layout.addWidget(QLabel(""))
 
-            buttonCancel = PyQt5.QtWidgets.QPushButton(_('Cancel'))
+            buttonCancel = QPushButton(_('Cancel'))
             buttonCancel.clicked.connect(self.closeWindow)
             layout.addWidget(buttonCancel)
 
-            buttonSave = PyQt5.QtWidgets.QPushButton(_('Save && Close'))
+            buttonSave = QPushButton(_('&Save && Close'))
+            buttonSave.setToolTip(_("Shortcut: {}").format("Ctrl+S"))
+            self.shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
+            self.shortcut.setAutoRepeat(False)
+            self.shortcut.activated.connect(self.saveCloseWindow)
             buttonSave.clicked.connect(self.saveCloseWindow)
             layout.addWidget(buttonSave)
 
             self.buttonGroup = layout
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
 
     def changed(self, *values):
@@ -355,42 +279,25 @@ class SubwindowConnections(PyQt5.QtWidgets.QWidget):
 
     def saveData(self):
         """Save the data to config."""
+        if(self.__dataChanged):
+            scctool.settings.config.parser.set(
+                "Twitch", "channel", self.twitchChannel.text().strip())
+            scctool.settings.config.parser.set(
+                "Twitch", "oauth", self.twitchToken.text().strip())
+            scctool.settings.config.parser.set(
+                "Twitch", "title_template", self.twitchTemplate.text().strip())
+            scctool.settings.config.parser.set(
+                "Twitch",
+                "set_game",
+                str(self.cb_set_game.isChecked()))
 
-        self.saveFtpData()
+            scctool.settings.config.parser.set(
+                "Nightbot", "token", self.nightbotToken.text().strip())
 
-        scctool.settings.config.parser.set(
-            "Twitch", "channel", self.twitchChannel.text().strip())
-        scctool.settings.config.parser.set(
-            "Twitch", "oauth", self.twitchToken.text().strip())
-        scctool.settings.config.parser.set(
-            "Twitch", "title_template", self.twitchTemplate.text().strip())
+            self.__dataChanged = False
+            self.controller.refreshButtonStatus()
 
         scctool.settings.nightbot_commands = CommandDropBox.getData()
-
-        self.saveWebsocketdata()
-
-        self.controller.refreshButtonStatus()
-
-    def saveFtpData(self):
-        """Save FTP data."""
-        scctool.settings.config.parser.set(
-            "FTP", "server", self.ftpServer.text().strip())
-        scctool.settings.config.parser.set(
-            "FTP", "user", self.ftpUser.text().strip())
-        scctool.settings.config.parser.set("FTP", "passwd", base64.b64encode(
-            self.ftpPwd.text().strip().encode()).decode("utf8"))
-        scctool.settings.config.parser.set(
-            "FTP", "dir", self.ftpDir.text().strip())
-
-    def saveWebsocketdata(self):
-        """Save Websocket data."""
-        for ident, key in self.hotkeys.items():
-            string = scctool.settings.config.dumpHotkey(key.getKey())
-            scctool.settings.config.parser.set("Intros", ident, string)
-        scctool.settings.config.parser.set(
-            "Intros", "display_time", str(self.sb_displaytime.value()))
-        scctool.settings.config.parser.set(
-            "Intros", "sound_volume", str(self.sl_sound.value()))
 
     def saveCloseWindow(self):
         """Save and close window."""
@@ -406,62 +313,68 @@ class SubwindowConnections(PyQt5.QtWidgets.QWidget):
         """Handle close event."""
         try:
             if(not self.__dataChanged):
-                self.controller.updateHotkeys()
                 CommandDropBox.clean()
                 event.accept()
                 return
             if(not self.passEvent):
                 if(self.isMinimized()):
                     self.showNormal()
-                buttonReply = PyQt5.QtWidgets.QMessageBox.question(
+                buttonReply = QMessageBox.question(
                     self, _('Save data?'), _("Do you want to save the data?"),
-                    PyQt5.QtWidgets.QMessageBox.Yes | PyQt5.QtWidgets.QMessageBox.No,
-                    PyQt5.QtWidgets.QMessageBox.No)
-                if buttonReply == PyQt5.QtWidgets.QMessageBox.Yes:
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No)
+                if buttonReply == QMessageBox.Yes:
                     self.saveData()
-            self.controller.updateHotkeys()
             CommandDropBox.clean()
             event.accept()
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
 
+    def testPlaceholder(self, string):
+        """Test placeholders."""
+        string = self.controller.placeholders.replace(string)
+        QMessageBox.information(self, _("Output:"), string)
 
-class CommandDropBox(PyQt5.QtWidgets.QGroupBox):
+
+class CommandDropBox(QGroupBox):
+    """QGroupBox for Nightbot command."""
+
     _instances = set()
     _todelete = set()
 
     def __init__(self, controller, cmd="", msg="", parent=None):
-        super(CommandDropBox, self).__init__(parent)
+        """Init dropbox."""
+        super().__init__(parent)
         self.controller = controller
         self._instances.add(weakref.ref(self))
         self.ident = len(self._instances)
-        layout = PyQt5.QtWidgets.QHBoxLayout()
+        layout = QHBoxLayout()
 
         self.command = MonitoredLineEdit()
         self.command.setText(cmd)
-        self.command.setAlignment(PyQt5.QtCore.Qt.AlignCenter)
+        self.command.setAlignment(Qt.AlignCenter)
         self.command.setPlaceholderText(("!command"))
         layout.addWidget(self.command)
 
         self.message = MonitoredLineEdit()
         self.message.setText(msg)
-        self.message.setAlignment(PyQt5.QtCore.Qt.AlignCenter)
+        self.message.setAlignment(Qt.AlignCenter)
         self.message.setPlaceholderText(_('message, e.g.,') + ' (URL)')
         self.message.setToolTip(
-            _('Available placeholders:') + ' ' +
-            ', '.join(self.controller.placeholders.available()))
+            _('Available placeholders:') + ' '
+            + ', '.join(self.controller.placeholders.available()))
         completer = Completer(
             self.controller.placeholders.available(), self.message)
 
         self.message.setCompleter(completer)
         layout.addWidget(self.message)
 
-        self.pushButton1 = PyQt5.QtWidgets.QPushButton(_('Test'))
+        self.pushButton1 = QPushButton(_('Test'))
         self.pushButton1.clicked.connect(
             lambda: self.testPlaceholder(self.message.text()))
         layout.addWidget(self.pushButton1)
 
-        self.pushButton2 = PyQt5.QtWidgets.QPushButton(_('Delete'))
+        self.pushButton2 = QPushButton(_('Delete'))
         self.pushButton2.clicked.connect(self.remove)
         layout.addWidget(self.pushButton2)
         self.setLayout(layout)
@@ -472,20 +385,24 @@ class CommandDropBox(PyQt5.QtWidgets.QGroupBox):
                 obj.setTitle()
 
     def connect(self, handler):
+        """Connect handler."""
         self.command.textModified.connect(handler)
         self.message.textModified.connect(handler)
 
     def setTitle(self):
+        """Set the title."""
         title = "Command {}".format(self.ident)
-        super(CommandDropBox, self).setTitle(title)
+        super().setTitle(title)
         self.pushButton2.setDisabled(len(self._instances) == 1)
 
     def adjustIdent(self, removedIdent):
+        """Adjust ident."""
         if removedIdent < self.ident:
             self.ident -= 1
         self.setTitle()
 
     def remove(self):
+        """Remove command."""
         self.parent().layout().removeWidget(self)
         cmd = self.command.text().strip()
         if cmd:
@@ -500,14 +417,16 @@ class CommandDropBox(PyQt5.QtWidgets.QGroupBox):
     def testPlaceholder(self, string):
         """Test placeholders."""
         string = self.controller.placeholders.replace(string)
-        PyQt5.QtWidgets.QMessageBox.information(self, _("Output:"), string)
+        QMessageBox.information(self, _("Output:"), string)
 
     @classmethod
     def addDeletedCommand(cls, cmd):
+        """Delete command to to-delete-list."""
         cls._todelete.add(cmd.strip())
-        
+
     @classmethod
     def getData(cls):
+        """Return commands."""
         data = dict()
         for cmd in cls._todelete:
             data[cmd] = "__DELETE__"
@@ -519,8 +438,9 @@ class CommandDropBox(PyQt5.QtWidgets.QGroupBox):
                 if cmd and msg:
                     data[cmd] = msg
         return data
-        
+
     @classmethod
     def clean(cls):
+        """Clean command."""
         cls._instances = set()
         cls._todelete = set()

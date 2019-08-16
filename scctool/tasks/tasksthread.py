@@ -2,24 +2,32 @@
 import logging
 import time
 
-import PyQt5
+from PyQt5.QtCore import QThread
+
+import scctool.settings.translation
 
 # create logger
-module_logger = logging.getLogger('scctool.tasks.tasksthread')
+module_logger = logging.getLogger(__name__)
+_ = scctool.settings.translation.gettext
 
 
-class TasksThread(PyQt5.QtCore.QThread):
+class TasksThread(QThread):
     """Define generic thread for various tasks."""
 
     def __init__(self):
         """Init thread."""
-        PyQt5.QtCore.QThread.__init__(self)
+        QThread.__init__(self)
 
         self.__tasks = {}
         self.__run = {}
         self.__methods = {}
         self.__timeout = 1
         self.__idx = 0
+        self.__wait_first = False
+
+    def setWaitFirst(self, wait_first):
+        """Set the thread to wait first."""
+        self.__wait_first = bool(wait_first)
 
     def setTimeout(self, timeout):
         """Set the timeout between tasks."""
@@ -46,7 +54,10 @@ class TasksThread(PyQt5.QtCore.QThread):
     def activateTask(self, task):
         """Activate a task."""
         if not (task in self.__tasks):
-            raise UserWarning("Task {} is not valid.".format(task))
+            raise UserWarning(
+                "Task {} of {} is not valid.".format(
+                    task,
+                    self.__class__.__name__))
 
         self.__tasks[task] = True
 
@@ -61,7 +72,10 @@ class TasksThread(PyQt5.QtCore.QThread):
     def deactivateTask(self, task):
         """Deactivate a Task."""
         if not (task in self.__tasks):
-            raise UserWarning("Task {} is not valid.".format(task))
+            raise UserWarning(
+                "Task {} of {} is not valid.".format(
+                    task,
+                    self.__class__.__name__))
         self.__tasks[task] = False
 
     def execTask(self, task):
@@ -89,7 +103,7 @@ class TasksThread(PyQt5.QtCore.QThread):
         cycles = int(self.__timeout / cycletime)
         rest = max(self.__timeout - cycles * cycletime, 0.0)
 
-        for i in range(cycles):
+        for __ in range(cycles):
             time.sleep(cycletime)
             if(not self.hasActiveTask()):
                 return
@@ -97,10 +111,14 @@ class TasksThread(PyQt5.QtCore.QThread):
 
     def run(self):
         """Run the thread."""
-        module_logger.info("A TasksThread is starting.")
+        module_logger.info(
+            "A {} is starting.".format(self.__class__.__name__))
+
+        if self.__wait_first:
+            self.__wait()
 
         while self.hasActiveTask():
             self.execActiveTasks()
             self.__wait()
 
-        module_logger.info("A TasksThread is done.")
+        module_logger.info("A {} is done.".format(self.__class__.__name__))

@@ -1,23 +1,29 @@
 """Get info about latest version and download it in the background."""
-
-from scctool.settings.client_config import ClientConfig
-from pyupdater.client import Client
-import scctool
+import json
 import logging
 import os
-import zipfile
 import sys
-import json
-import shutil
 import tarfile
-import PyQt5
+import zipfile
+
+from PyQt5.QtCore import pyqtSignal
+
+import scctool
+import scctool.settings.translation
+from pyupdater.client import Client
+from scctool.settings.client_config import ClientConfig
 from scctool.tasks.tasksthread import TasksThread
 
-module_logger = logging.getLogger('scctool.tasks.updater')
+module_logger = logging.getLogger(__name__)
+_ = scctool.settings.translation.gettext
+this = sys.modules[__name__]
+this.data = dict()
 
 
 def compareVersions(v1, v2, maximum=5):
     """Compare two versions."""
+    v1 = v1.replace('beta', '.')
+    v2 = v2.replace('beta', '.')
     v1 = v1.split(".")
     v2 = v2.split(".")
     max_idx = min(max(len(v1), len(v2)), maximum)
@@ -37,113 +43,95 @@ def compareVersions(v1, v2, maximum=5):
     return 0
 
 
+def getChannel(version=None):
+    """Get update channel (beta or stable)."""
+    if version is None:
+        version = scctool.__version__
+    return 'beta' if 'beta' in version else 'stable'
+
+
 def needInitialUpdate(version):
     """Check if data update is needed."""
     if version == '0.0.0':
         return True
-    elif not os.path.exists(scctool.settings.getAbsPath("src")):
+    elif not os.path.exists(
+            scctool.settings.getAbsPath(scctool.settings.casting_html_dir)):
         return True
-    elif not os.path.exists(scctool.settings.getAbsPath(scctool.settings.OBShtmlDir)):
-        return True
-    elif not os.path.exists(scctool.settings.getAbsPath(scctool.settings.OBSmapDir)):
+    elif getLastVersion() != scctool.__version__:
+        setLastVersion(scctool.__version__)
         return True
     else:
         return False
 
 
+def readJsonFile(force=False):
+    """Read versiondata.json file."""
+    if not force and len(this.data) > 0:
+        return
+    try:
+        with open(scctool.settings.getJsonFile('versiondata'), 'r',
+                  encoding='utf-8-sig') as f:
+            this.data = json.load(f)
+    except Exception:
+        this.data = dict()
+
+
+def dumpJsonFile():
+    """Save to versiondata.json file."""
+    readJsonFile()
+    with open(scctool.settings.getJsonFile('versiondata'), 'w',
+              encoding='utf-8-sig') as o:
+        json.dump(this.data, o)
+
+
 def getDataVersion():
     """Read data version from json file."""
-    version = '0.0.0'
-    try:
-        with open(scctool.settings.versiondata_json_file, 'r') as f:
-            data = json.load(f)
-            version = data.get('data_version', version)
-    finally:
-        return version
+    readJsonFile()
+    return this.data.get('data_version', '0.0.0')
 
 
 def setDataVersion(version):
     """Write data version to json file."""
-    data = {}
-    data['data_version'] = version
-    with open(scctool.settings.versiondata_json_file, 'w') as outfile:
-        json.dump(data, outfile)
-        
+    readJsonFile()
+    this.data['data_version'] = version
+    dumpJsonFile()
+
+
+def getLastVersion():
+    """Read data version from json file."""
+    readJsonFile()
+    return this.data.get('last_version', '0.0.0')
+
+
+def setLastVersion(version):
+    """Write data version to json file."""
+    readJsonFile()
+    this.data['last_version'] = version
+    dumpJsonFile()
+
 
 def getRestartFlag():
-    flag = False
-    try:
-        with open(scctool.settings.versiondata_json_file, 'r') as f:
-            data = json.load(f)
-            flag = data.get('restart_flag', False)
-    finally:
-        return flag
-        
+    """Get the current restart flag."""
+    readJsonFile()
+    return this.data.get('restart_flag', False)
+
+
 def setRestartFlag(flag=True):
-        with open(scctool.settings.versiondata_json_file, 'r') as f:
-            data = json.load(f)
-        data['restart_flag'] = bool(flag)
-        with open(scctool.settings.versiondata_json_file, 'w') as outfile:
-            json.dump(data, outfile)
-    
-
-
-def deleteObsoleteFiles():
-    """Remove obsolete files."""
-    # mv OBS_html/src/css/intro_styles to OBS_html/src/css/intro
-    try:
-        old = scctool.settings.getAbsPath(os.path.join(
-            scctool.settings.OBShtmlDir, 'src/css/intro_styles'))
-        new = scctool.settings.getAbsPath(os.path.join(
-            scctool.settings.OBShtmlDir, 'src/css/intro'))
-        os.rename(old, new)
-    except Exception as e:
-        pass
-
-    # rm OBS_html/src/css/intro.css
-    try:
-        file = scctool.settings.getAbsPath(os.path.join(
-            scctool.settings.OBShtmlDir, 'src/css/intro.css'))
-        os.remove(file)
-    except Exception as e:
-        pass
-
-    # rm OBS_html/intro1.html
-    try:
-        file = scctool.settings.getAbsPath(os.path.join(
-            scctool.settings.OBShtmlDir, 'intro1.html'))
-        os.remove(file)
-    except Exception as e:
-        pass
-
-    # rm OBS_html/intro2.html
-    try:
-        file = scctool.settings.getAbsPath(os.path.join(
-            scctool.settings.OBShtmlDir, 'intro2.html'))
-        os.remove(file)
-    except Exception as e:
-        pass
-
-    # rm OBS_html/data/intro-template.html
-    try:
-        file = scctool.settings.getAbsPath(os.path.join(
-            scctool.settings.OBShtmlDir, 'data/intro-template.html'))
-        os.remove(file)
-    except Exception as e:
-        pass
+    """Set a restart flag."""
+    readJsonFile()
+    this.data['restart_flag'] = bool(flag)
+    dumpJsonFile()
 
 
 def extractData(asset_update, handler=lambda x: None):
     """Extract data."""
-    handler(5)
-    deleteObsoleteFiles()
     handler(10)
     if asset_update.is_downloaded():
         file = os.path.join(asset_update.update_folder,
                             asset_update.filename)
-        targetdir = scctool.settings.basedir
-        with zipfile.ZipFile(file, "r") as zip:
-            zip.extractall(targetdir)
+        targetdir = scctool.settings.profileManager.profiledir()
+        with zipfile.ZipFile(file, "r") as myzip:
+            myzip.extractall(targetdir)
         handler(50)
         file = os.path.join(targetdir,
                             'SCCT-data.tar')
@@ -153,54 +141,20 @@ def extractData(asset_update, handler=lambda x: None):
         os.remove(file)
         handler(95)
         setDataVersion(asset_update.latest)
-
-        copyStyleFile(scctool.settings.OBSmapDir + "/src/css/box_styles",
-                      scctool.settings.OBSmapDir + "/src/css/box.css",
-                      scctool.settings.config.parser.get("Style", "mapicon_box"))
-
-        copyStyleFile(scctool.settings.OBSmapDir + "/src/css/landscape_styles",
-                      scctool.settings.OBSmapDir + "/src/css/landscape.css",
-                      scctool.settings.config.parser.get("Style", "mapicon_landscape"))
-
-        copyStyleFile(scctool.settings.OBShtmlDir + "/src/css/score_styles",
-                      scctool.settings.OBShtmlDir + "/src/css/score.css",
-                      scctool.settings.config.parser.get("Style", "score"))
-
         handler(100)
-
-
-def copyStyleFile(style_dir, css_file, value):
-    """Copy the style files after update."""
-    try:
-        new_file = os.path.join(style_dir, value + ".css")
-
-        new_file = scctool.settings.getAbsPath(new_file)
-        css_file = scctool.settings.getAbsPath(css_file)
-
-        shutil.copy(new_file, css_file)
-
-        # fname = os.path.basename(css_file)
-        # dirs = os.path.dirname(css_file)
-
-    except Exception as e:
-        module_logger.exception("message")
-
-    # controller.ftpUploader.cwd(dirs)
-    # controller.ftpUploader.upload(css_file, fname)
-    # controller.ftpUploader.cwdback(dirs)
 
 
 class VersionHandler(TasksThread):
     """Check for new version and update or notify."""
 
-    newVersion = PyQt5.QtCore.pyqtSignal(str)
-    newData = PyQt5.QtCore.pyqtSignal(str)
-    noNewVersion = PyQt5.QtCore.pyqtSignal()
-    progress = PyQt5.QtCore.pyqtSignal(dict)
-    updated_data = PyQt5.QtCore.pyqtSignal(str)
+    newVersion = pyqtSignal(str)
+    newData = pyqtSignal(str)
+    noNewVersion = pyqtSignal()
+    progress = pyqtSignal(dict)
+    updated_data = pyqtSignal(str)
 
     # Constants
-    APP_NAME = 'StarCraft-Casting-Tool'
+    APP_NAME = ClientConfig.APP_NAME
     APP_VERSION = scctool.__version__
 
     ASSET_NAME = 'SCCT-data'
@@ -213,7 +167,7 @@ class VersionHandler(TasksThread):
 
     def __init__(self, controller):
         """Init the thread."""
-        super(VersionHandler, self).__init__()
+        super().__init__()
 
         self.__controller = controller
         self.setTimeout(10)
@@ -227,7 +181,8 @@ class VersionHandler(TasksThread):
 
     def isCompatible(self):
         """Check if data update is needed."""
-        return compareVersions(self.asset_update.latest, self.APP_VERSION, 2) < 1
+        return compareVersions(self.asset_update.latest,
+                               self.APP_VERSION, 3) < 1
 
     def update_progress(self, data):
         """Process progress updates."""
@@ -238,11 +193,10 @@ class VersionHandler(TasksThread):
             self.client.add_progress_hook(self.update_progress)
             self.client.refresh()
             self.ASSET_VERSION = getDataVersion()
+            channel = getChannel(self.APP_VERSION)
             self.app_update = self.client.update_check(self.APP_NAME,
                                                        self.APP_VERSION,
-                                                       channel='stable')
-            self.asset_update = self.client.update_check(self.ASSET_NAME,
-                                                         self.ASSET_VERSION)
+                                                       channel=channel)
             if self.asset_update is not None:
                 self.newData.emit(self.asset_update.latest)
                 module_logger.info("Asset: " + self.asset_update.latest)
@@ -256,7 +210,7 @@ class VersionHandler(TasksThread):
                 module_logger.info("App: " + self.app_update.latest)
             else:
                 self.noNewVersion.emit()
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
         finally:
             self.deactivateTask('version_check')
@@ -271,7 +225,7 @@ class VersionHandler(TasksThread):
             extractData(self.asset_update)
             module_logger.info("Updated data files!")
             self.updated_data.emit(_("Updated data files!"))
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
         finally:
             self.deactivateTask('update_data')
@@ -283,13 +237,14 @@ class VersionHandler(TasksThread):
                 return
             if hasattr(sys, "frozen"):
                 module_logger.info("Start to update app!")
-                self.app_update.download(async=False)
+                self.app_update.download(False)
                 if self.app_update.is_downloaded():
                     module_logger.info("Download sucessfull.")
                     self.__controller.cleanUp()
+                    setRestartFlag()
                     module_logger.info("Restarting...")
                     self.app_update.extract_restart()
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
         finally:
             self.deactivateTask('update_app')

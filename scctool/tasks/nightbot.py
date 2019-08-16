@@ -1,16 +1,14 @@
 """Update Nightbot commands."""
 import logging
 
+import requests
+
+import scctool.settings
+import scctool.settings.translation
+
 # create logger
-module_logger = logging.getLogger('scctool.tasks.nightbot')
-
-try:
-    import requests
-    import scctool.settings
-
-except Exception as e:
-    module_logger.exception("message")
-    raise
+module_logger = logging.getLogger(__name__)
+_ = scctool.settings.translation.gettext
 
 
 def base_headers():
@@ -28,8 +26,9 @@ def updateCommand(data):
     # Updates the twitch title specified in the config file
     try:
         headers = base_headers()
-        headers.update({"Authorization": "Bearer " +
-                        scctool.settings.config.parser.get("Nightbot", "token")})
+        headers.update({"Authorization": "Bearer "
+                        + scctool.settings.config.parser.get("Nightbot",
+                                                           "token")})
 
         response = requests.get(
             "https://api.nightbot.tv/1/commands",
@@ -56,12 +55,14 @@ def updateCommand(data):
         module_logger.exception("message")
         yield '', msg, success, False
 
-    for cmdFound, skipUpdate, id, cmd, message in findCommands(response.json(), data):
+    for cmdFound, skipUpdate, cmd_id, cmd, message in \
+            findCommands(response.json(), data):
         try:
             deleted = False
             if(skipUpdate):
                 previousMsg[cmd] = message
-                msg = _("Nightbot command '{}' was already set to '{}'").format(
+                msg = _("Nightbot command '{}' "
+                        + "was already set to '{}'").format(
                     cmd, message)
                 success = True
                 yield cmd, msg, success, False
@@ -69,12 +70,14 @@ def updateCommand(data):
             elif(cmdFound):
                 if message != "__DELETE__":
                     put_data = {"message": message}
-                    requests.put("https://api.nightbot.tv/1/commands/" + id,
-                                headers=headers,
-                                data=put_data).raise_for_status()
+                    requests.put(
+                        "https://api.nightbot.tv/1/commands/" + cmd_id,
+                        headers=headers,
+                        data=put_data).raise_for_status()
                 else:
-                    requests.delete("https://api.nightbot.tv/1/commands/" + id,
-                                headers=headers).raise_for_status()
+                    requests.delete(
+                        "https://api.nightbot.tv/1/commands/" + cmd_id,
+                        headers=headers).raise_for_status()
                     deleted = True
             elif(message != "__DELETE__"):
                 post_data = {"message": message,
@@ -89,12 +92,12 @@ def updateCommand(data):
                 deleted = True
 
             previousMsg[cmd] = message
-            
+
             if deleted:
                 msg = _("Deleted command '{}'").format(cmd)
             else:
                 msg = _("Updated Nightbot command '{}' to '{}'").format(
-                cmd, message)
+                    cmd, message)
             success = True
 
         except requests.exceptions.HTTPError as e:
@@ -117,18 +120,20 @@ def updateCommand(data):
             module_logger.exception("message")
         finally:
             yield cmd, msg, success, deleted
-            
+
     return
 
 
 def findCommands(response, data):
+    """Search for commands response."""
     commands_found = dict()
     for i in range(0, response['_total']):
         commands_found[response['commands'][i]['name']] = i
     for cmd, msg in data.items():
         if cmd in commands_found:
             idx = commands_found[cmd]
-            if response['commands'][idx]['message'] == msg and msg != "__DELETE__":
+            if (response['commands'][idx]['message'] == msg
+                    and msg != "__DELETE__"):
                 yield True, True, response['commands'][idx]['_id'], cmd, msg
             else:
                 yield True, False, response['commands'][idx]['_id'], cmd, msg

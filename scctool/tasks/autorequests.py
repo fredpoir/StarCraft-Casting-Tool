@@ -1,27 +1,31 @@
 """Sent request to Nightbot and Twitch if needed."""
 import logging
-import PyQt5
 
-from scctool.tasks.tasksthread import TasksThread
+from PyQt5.QtCore import pyqtSignal
 
 import scctool.settings
-import scctool.tasks.twitch
+import scctool.settings.translation
 import scctool.tasks.nightbot
+import scctool.tasks.twitch
+from scctool.tasks.tasksthread import TasksThread
+
 
 # create logger
-module_logger = logging.getLogger('scctool.tasks.autorequests')
+module_logger = logging.getLogger(__name__)
+
+_ = scctool.settings.translation.gettext
 
 
 class AutoRequestsThread(TasksThread):
     """Sent request to Nightbot and Twitch if needed."""
 
-    twitchSignal = PyQt5.QtCore.pyqtSignal(str)
-    nightbotSignal = PyQt5.QtCore.pyqtSignal(str)
-    disableCB = PyQt5.QtCore.pyqtSignal(str)
+    twitchSignal = pyqtSignal(str)
+    nightbotSignal = pyqtSignal(str)
+    disableCB = pyqtSignal(str)
 
     def __init__(self, controller):
         """Init the thread."""
-        super(AutoRequestsThread, self).__init__()
+        super().__init__()
 
         self.__controller = controller
         self.setTimeout(10)
@@ -50,11 +54,10 @@ class AutoRequestsThread(TasksThread):
 
     def __twitchOnceTask(self):
         try:
-            self.__controller.updateData()
             title = scctool.settings.config.parser.get(
                 "Twitch", "title_template")
             title = self.__controller.placeholders.replace(title)
-            msg, success = scctool.tasks.twitch.updateTitle(title)
+            msg, __ = scctool.tasks.twitch.updateTitle(title)
             self.twitchSignal.emit(msg)
         finally:
             self.deactivateTask('twitch_once')
@@ -68,7 +71,8 @@ class AutoRequestsThread(TasksThread):
             elif(scctool.tasks.nightbot.previousMsg[command] != message):
                 data[command] = message
 
-        for cmd, msg, _, deleted in scctool.tasks.nightbot.updateCommand(data):
+        for cmd, msg, success, deleted in \
+                scctool.tasks.nightbot.updateCommand(data):
             self.nightbotSignal.emit(msg)
             if not success:
                 self.disableCB.emit('nightbot')
@@ -78,12 +82,12 @@ class AutoRequestsThread(TasksThread):
 
     def __nightbotOnceTask(self):
         try:
-            self.__controller.updateData()
             data = dict()
             for command, message in scctool.settings.nightbot_commands.items():
                 message = self.__controller.placeholders.replace(message)
                 data[command] = message
-            for cmd, msg, _, deleted in scctool.tasks.nightbot.updateCommand(data):
+            for cmd, msg, _, deleted in \
+                    scctool.tasks.nightbot.updateCommand(data):
                 self.nightbotSignal.emit(msg)
                 if deleted:
                     scctool.settings.nightbot_commands.pop(cmd, None)

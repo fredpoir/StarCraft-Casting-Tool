@@ -1,51 +1,55 @@
 """Grab match data from websites."""
-
-import requests
 import logging
 
+import requests
+
+import scctool.settings.translation
+
 # create logger
-module_logger = logging.getLogger('scctool.matchgrabber.custom')
+module_logger = logging.getLogger(__name__)
+_ = scctool.settings.translation.gettext
 
 
 class MatchGrabber(object):
     """Parent definition,i.e., for custom matchs."""
 
-    def __init__(self, matchData, controller, id=False):
+    _provider = "Custom"
+
+    def __init__(self, matchData, controller, ident=False):
         """Init match grabber."""
         self._id = 0
-        self.setID(id)
+        self.setID(ident)
         self._controller = controller
         self._matchData = matchData
-        self._provider = "Custom"
         self._urlprefix = ""
         self._apiprefix = ""
         self._rawData = None
 
-    def setID(self, id=False):
+    def setID(self, ident=False):
         """Set ID."""
-        if id:
-            self._id = int(id)
+        if ident:
+            self._id = int(ident)
 
     def getID(self):
         """Get ID as int."""
         return int(self._id)
 
-    def _getAPI(self, id=False):
+    def _getAPI(self, ident=False):
         if id:
-            self.setID(id)
+            self.setID(ident)
         return self._apiprefix + str(self.getID())
 
-    def getURL(self, id=False):
+    def getURL(self, ident=False):
         """Get URL."""
-        if id:
-            self.setID(id)
+        if ident:
+            self.setID(ident)
         return self._urlprefix + str(self.getID())
 
     def getProvider(self):
         """Get name of the provider."""
         return self._provider
 
-    def grabData(self):
+    def grabData(self, metaChange=False, logoManager=None):
         """Grab match data."""
         raise ValueError(
             "Error: Cannot grab data from this provider.")
@@ -54,7 +58,13 @@ class MatchGrabber(object):
         data = requests.get(url=self._getAPI()).json()
         return data
 
-    def downloadLogos(self):
+    def _aliasPlayer(self, player):
+        return self._controller.aliasManager.translatePlayer(player)
+
+    def _aliasTeam(self, player):
+        return self._controller.aliasManager.translateTeam(player)
+
+    def downloadLogos(self, logoManager):
         """Download logos."""
         raise UserWarning(
             "Error: Cannot download logos from this provider.")

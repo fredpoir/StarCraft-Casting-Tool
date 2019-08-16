@@ -1,33 +1,41 @@
 """Control all other modules."""
 import logging
+import os
+import shutil
+import subprocess
+import sys
+import webbrowser
+
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QCheckBox, QMessageBox
+
+import scctool.settings
+import scctool.settings.translation
+import scctool.tasks.nightbot
+import scctool.tasks.twitch
+from scctool.matchcontrol import MatchControl
+from scctool.settings.alias import AliasManager
+from scctool.settings.aligulac import AligulacManager
+from scctool.settings.history import HistoryManager
+from scctool.settings.logoManager import LogoManager
+from scctool.settings.placeholders import PlaceholderList
+from scctool.tasks.aligulac import AligulacThread
+from scctool.tasks.auth import AuthThread
+from scctool.tasks.autorequests import AutoRequestsThread
+from scctool.tasks.housekeeper import HouseKeeperThread
+from scctool.tasks.mapstats import MapStatsManager
+from scctool.tasks.sc2ClientInteraction import (SC2ApiThread, SwapPlayerNames,
+                                                ToggleScore)
+from scctool.tasks.textfiles import TextFilesThread
+from scctool.tasks.texttospeech import TextToSpeech
+from scctool.tasks.updater import VersionHandler
+from scctool.tasks.websocket import WebsocketThread
+from scctool.view.widgets import ToolUpdater
 
 # create logger
-module_logger = logging.getLogger('scctool.controller')
+module_logger = logging.getLogger(__name__)
 
-try:
-    from scctool.matchdata import matchData
-    from scctool.tasks.apithread import SC2ApiThread, ToggleScore
-    from scctool.tasks.webapp import FlaskThread
-    from scctool.settings.placeholders import PlaceholderList
-    from scctool.tasks.ftpuploader import FTPUploader
-    from scctool.tasks.websocket import WebsocketThread
-    from scctool.tasks.autorequests import AutoRequestsThread
-    from scctool.tasks.updater import VersionHandler
-    from scctool.view.widgets import ToolUpdater
-    import scctool.settings
-    import scctool.tasks.twitch
-    import scctool.tasks.nightbot
-    import webbrowser
-    import os
-    import sys
-    import shutil
-
-    import PyQt5
-
-
-except Exception as e:
-    module_logger.exception("message")
-    raise
+_ = scctool.settings.translation.gettext
 
 
 class MainController:
@@ -36,23 +44,41 @@ class MainController:
     def __init__(self):
         """Init controller and connect them with other modules."""
         try:
-            self.matchData = matchData(self)
+            self.matchControl = MatchControl(self)
+            self.matchControl.readJsonFile()
+            # self.matchControl.activeMatch() = matchData(self)
+            self.authThread = AuthThread()
+            self.authThread.tokenRecived.connect(self.tokenRecived)
+            self.textFilesThread = TextFilesThread(self.matchControl)
+            self.matchControl.dataChanged.connect(self.handleMatchDataChange)
+            self.matchControl.metaChanged.connect(self.matchMetaDataChanged)
             self.SC2ApiThread = SC2ApiThread(self)
+            self.SC2ApiThread.requestScoreUpdate.connect(
+                self.requestScoreUpdate)
             self.versionHandler = VersionHandler(self)
-            self.webApp = FlaskThread()
-            self.webApp.signal_twitch.connect(self.webAppDone_twitch)
-            self.webApp.signal_nightbot.connect(self.webAppDone_nightbot)
-            self.ftpUploader = FTPUploader()
             self.websocketThread = WebsocketThread(self)
+            self.websocketThread.socketConnectionChanged.connect(
+                self.toogleLEDs)
+            self.websocketThread.introShown.connect(self.updatePlayerIntroIdx)
+            self.runWebsocketThread()
+            self.aligulacManager = AligulacManager()
+            self.aligulacThread = AligulacThread(
+                self.matchControl,
+                self.websocketThread,
+                self.aligulacManager)
             self.autoRequestsThread = AutoRequestsThread(self)
-            self.placeholderSetup()
             self._warning = False
             self.checkVersion()
+            self.logoManager = LogoManager(self)
+            self.aliasManager = AliasManager()
+            self.historyManager = HistoryManager()
+            self.mapstatsManager = MapStatsManager(self)
+            self.tts = TextToSpeech()
+            self.housekeeper = HouseKeeperThread(self)
             self.initPlayerIntroData()
-            scctool.settings.maps = scctool.settings.loadMapList()
-            pass
+            self._my_ip = ''
 
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
             raise
 
@@ -77,189 +103,184 @@ class MainController:
 
     def placeholderSetup(self):
         """Define and connect placeholders."""
-        self.placeholders = PlaceholderList()
-        self.placeholders.addConnection("Team1",
-                                        lambda: self.matchData.getTeamOrPlayer(0))
-        self.placeholders.addConnection("Team2",
-                                        lambda: self.matchData.getTeamOrPlayer(1))
-        self.placeholders.addConnection("URL", self.matchData.getURL)
-        self.placeholders.addConnection(
-            "BestOf", lambda: str(self.matchData.getBestOfRaw()))
-        self.placeholders.addConnection("League", self.matchData.getLeague)
-        self.placeholders.addConnection("Score", self.matchData.getScoreString)
+        placeholders = PlaceholderList()
+
+        placeholders.addConnection(
+            "Team1", lambda:
+            self.matchControl.activeMatch().getTeamOrPlayer(0))
+        placeholders.addConnection(
+            "Team2", lambda:
+            self.matchControl.activeMatch().getTeamOrPlayer(1))
+        placeholders.addConnection(
+            "Race1", lambda:
+            self.matchControl.activeMatch().getNextRace(0)[0])
+        placeholders.addConnection(
+            "Race2", lambda:
+            self.matchControl.activeMatch().getNextRace(1)[0])
+        placeholders.addConnection(
+            "URL", self.matchControl.activeMatch().getURL)
+        placeholders.addConnection(
+            "BestOf",
+            lambda: str(self.matchControl.activeMatch().getBestOf()))
+        placeholders.addConnection(
+            "League", self.matchControl.activeMatch().getLeague)
+        placeholders.addConnection(
+            "Score", self.matchControl.activeMatch().getScoreString)
+
+        self.placeholders = placeholders
 
     def setView(self, view):
         """Connect view."""
         self.view = view
         try:
-            self.matchData.readJsonFile()
-            self.view.trigger = False
-            self.updateForms()
-            self.view.trigger = True
+            # self.matchControl.activeMatch().readJsonFile()
+            with self.view.tlock:
+                self.updateMatchFormat()
             self.setCBs()
             self.view.resizeWindow()
-        except Exception as e:
+            self.housekeeper.activateTask('save')
+            self.housekeeper.alphaMatches.connect(self.view.le_url.updateItems)
+            self.housekeeper.activateTask('alphatl')
+            self.housekeeper.ip_updated.connect(self.update_ip)
+            self.housekeeper.activateTask('check_ip')
+        except Exception:
             module_logger.exception("message")
 
-    def updateForms(self):
-        """Update data in froms."""
+    def updateMatchFormat(self):
+        """Update match format in forms."""
         try:
-            if(self.matchData.getProvider() == "Custom"):
+            if(self.matchControl.selectedMatch().getProvider() == "Custom"):
                 self.view.tabs.setCurrentIndex(1)
             else:
                 self.view.tabs.setCurrentIndex(0)
 
-            self.view.cb_allkill.setChecked(self.matchData.getAllKill())
+            self.view.cb_allkill.setChecked(
+                self.matchControl.selectedMatch().getAllKill())
 
-            self.view.cb_solo.setChecked(self.matchData.getSolo())
+            self.view.cb_solo.setChecked(
+                self.matchControl.selectedMatch().getSolo())
 
-            index = self.view.cb_bestof.findText(str(self.matchData.getBestOfRaw()),
-                                                 PyQt5.QtCore.Qt.MatchFixedString)
+            index = self.view.cb_bestof.findText(
+                str(self.matchControl.selectedMatch().getBestOfRaw()),
+                Qt.MatchFixedString)
             if index >= 0:
                 self.view.cb_bestof.setCurrentIndex(index)
 
-            index = self.view.cb_minSets.findText(str(self.matchData.getMinSets()),
-                                                  PyQt5.QtCore.Qt.MatchFixedString)
+            ace_sets = self.matchControl.selectedMatch().getAceSets()
+            index = self.view.cb_ace_bo.findText(
+                str(ace_sets),
+                Qt.MatchFixedString)
+            if index >= 0:
+                self.view.cb_ace_bo.setCurrentIndex(index)
+            self.view.cb_extend_ace.setChecked(ace_sets > 0)
+
+            index = self.view.cb_minSets.findText(
+                str(self.matchControl.selectedMatch().getMinSets()),
+                Qt.MatchFixedString)
             if index >= 0:
                 self.view.cb_minSets.setCurrentIndex(index)
 
-            self.view.le_url.setText(self.matchData.getURL())
-            self.view.le_url_custom.setText(self.matchData.getURL())
-            self.view.le_league.setText(self.matchData.getLeague())
-            self.view.sl_team.setValue(self.matchData.getMyTeam())
-            for i in range(2):
-                self.view.le_team[i].setText(self.matchData.getTeam(i))
+            self.view.le_url.setURL(
+                self.matchControl.selectedMatch().getURL())
+            self.view.le_url_custom.setText(
+                self.matchControl.selectedMatch().getURL())
 
-            for j in range(2):
-                for i in range(1, self.matchData.getNoSets()):
-                    self.view.le_player[j][i].setReadOnly(
-                        self.matchData.getSolo())
+            vetoes = self.matchControl.selectedMatch().getNoVetoes()
+            index = self.view.cb_vetoes.findText(
+                str(vetoes),
+                Qt.MatchFixedString)
+            if index >= 0:
+                self.view.cb_vetoes.setCurrentIndex(index)
 
-            for i in range(min(self.view.max_no_sets, self.matchData.getNoSets())):
-                for j in range(2):
-                    self.view.le_player[j][i].setText(
-                        self.matchData.getPlayer(j, i))
-                    self.view.cb_race[j][i].setCurrentIndex(
-                        scctool.settings.race2idx(self.matchData.getRace(j, i)))
+            idx = self.matchControl.selectedMatchIdx()
+            matchWidget = self.view.matchDataTabWidget.widget(idx)
+            if matchWidget is not None:
+                matchWidget.toggleVetoes(vetoes > 0)
 
-                self.view.le_map[i].setText(self.matchData.getMap(i))
+            self.autoSetNextMap()
 
-                self.view.sl_score[i].setValue(self.matchData.getMapScore(i))
-
-            for i in range(self.matchData.getNoSets(), self.view.max_no_sets):
-                for j in range(2):
-                    self.view.le_player[j][i].hide()
-                    self.view.cb_race[j][i].hide()
-                self.view.le_map[i].hide()
-                self.view.sl_score[i].hide()
-                self.view.label_set[i].hide()
-
-            for i in range(min(self.view.max_no_sets, self.matchData.getNoSets())):
-                for j in range(2):
-                    self.view.le_player[j][i].show()
-                    self.view.cb_race[j][i].show()
-                self.view.le_map[i].show()
-                self.view.sl_score[i].show()
-                self.view.label_set[i].show()
-
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
             raise
 
-    def updateLogos(self):
-        """Updata team logos in  view."""
-        pixmap = PyQt5.QtGui.QIcon(scctool.settings.getAbsPath(self.linkFile(
-            scctool.settings.OBSdataDir + '/logo1')))
-        self.view.qb_logo1.setIcon(pixmap)
+    def updateLogos(self, force=False):
+        """Update team logos in  view."""
+        idx = self.matchControl.selectedMatchIdx()
+        matchWidget = self.view.matchDataTabWidget.widget(idx)
+        matchWidget.updateLogos(force)
 
-        pixmap = PyQt5.QtGui.QIcon(scctool.settings.getAbsPath(self.linkFile(
-            scctool.settings.OBSdataDir + '/logo2')))
-        self.view.qb_logo2.setIcon(pixmap)
-
-        self.updateLogosHTML()
-
-    def updateData(self, writeJson=True):
-        """Update match data from input of views."""
-        try:
-            self.matchData.setMyTeam(self.view.sl_team.value())
-            self.matchData.setLeague(self.view.le_league.text())
-
-            for i in range(2):
-                self.matchData.setTeam(i, self.view.le_team[i].text())
-
-            for i in range(min(self.view.max_no_sets, self.matchData.getNoSets())):
-                for j in range(2):
-                    self.matchData.setPlayer(
-                        j, i, self.view.le_player[j][i].text())
-                    self.matchData.setRace(j, i, scctool.settings.idx2race(
-                        self.view.cb_race[j][i].currentIndex()))
-
-                self.matchData.setMap(i, self.view.le_map[i].text())
-                self.matchData.setMapScore(
-                    i, self.view.sl_score[i].value(), True)
-
-        except Exception as e:
-            module_logger.exception("message")
-        finally:
-            if writeJson:
-                self.matchData.writeJsonFile()
-
-    def applyCustom(self, bestof, allkill, solo, minSets, url):
+    def applyCustom(self, bestof, allkill, solo,
+                    minSets, url, vetoes, extend_ace):
         """Apply a custom match format."""
         msg = ''
         try:
+            match = self.matchControl.selectedMatch()
+            idx = self.matchControl.selectedMatchIdx()
+            with match.emitLock(
+                    True,
+                    match.metaChanged):
+                match.setCustom(bestof, allkill, solo, extend_ace, vetoes)
+                match.setMinSets(minSets)
+                match.setURL(url)
+                self.matchControl.writeJsonFile()
+                self.updateMatchFormat()
+                matchWidget = self.view.matchDataTabWidget.widget(idx)
+                matchWidget.updateForms()
+                self.view.resizeWindow()
+                if idx == self.matchControl.activeMatchIdx():
+                    self.matchControl.selectedMatch().updateLeagueIcon()
 
-            self.matchData.setCustom(bestof, allkill, solo)
-            self.matchData.setMinSets(minSets)
-            self.matchData.setURL(url)
-            self.matchData.writeJsonFile()
-            self.updateForms()
-            self.view.resizeWindow()
-            self.updateOBS()
-
-        except Exception as e:
-            msg = str(e)
+        except Exception:
             module_logger.exception("message")
 
         return msg
 
     def resetData(self):
-        """Reset data."""
+        """Reset the match data."""
         msg = ''
         try:
+            self.matchControl.selectedMatch().resetData(False)
+            self.logoManager.resetTeam1Logo()
+            self.logoManager.resetTeam2Logo()
+            self.matchControl.writeJsonFile()
+            self.updateLogos(True)
+            idx = self.matchControl.selectedMatchIdx()
+            matchWidget = self.view.matchDataTabWidget.widget(idx)
+            matchWidget.updateForms()
+            self.updateMatchFormat()
 
-            self.matchData.resetData()
-            self.matchData.writeJsonFile()
-            self.updateForms()
-            self.updateOBS()
-
-        except Exception as e:
-            msg = str(e)
+        except Exception:
             module_logger.exception("message")
 
         return msg
 
-    def refreshData(self, url):
+    def refreshData(self, url, update_progress=lambda *args, **kwargs: None):
         """Load data from match grabber."""
         msg = ''
         try:
-            self.matchData.parseURL(url)
-            self.matchData.grabData()
-            self.matchData.autoSetMyTeam()
-            self.matchData.writeJsonFile()
+            match = self.matchControl.selectedMatch()
+            newProvider = match.parseURL(url)
+            update_progress(20)
+            match.grabData(newProvider, self.logoManager)
+            update_progress(80)
+            self.matchControl.writeJsonFile()
             try:
-                self.matchData.downloadLogos()
+                # TODO: Need to have multiple banners
+                match.downloadBanner()
             except Exception:
-                pass
-            try:
-                self.matchData.downloadBanner()
-            except Exception:
-                pass
-            self.updateLogos()
-            self.updateForms()
+                module_logger.exception("message")
+            update_progress(90)
+            self.updateLogos(True)
+            idx = self.matchControl.selectedMatchIdx()
+            matchWidget = self.view.matchDataTabWidget.widget(idx)
+            matchWidget.updateForms()
+            update_progress(95)
+            self.updateMatchFormat()
             self.view.resizeWindow()
-        except Exception as e:
-            msg = str(e)
+            self.matchControl.activeMatch().updateLeagueIcon()
+            update_progress(99)
+
+        except Exception:
             module_logger.exception("message")
 
         return msg
@@ -269,26 +290,28 @@ class MainController:
         try:
 
             self.view.cb_autoUpdate.setChecked(
-                scctool.settings.config.parser.getboolean("Form", "scoreupdate"))
+                scctool.settings.config.parser.getboolean("Form",
+                                                          "scoreupdate"))
+            network_listener = scctool.settings.config.parser.getboolean(
+                "SCT", "sc2_network_listener_enabled")
 
-            if scctool.settings.windows:
+            if scctool.settings.windows and not network_listener:
                 self.view.cb_autoToggleScore.setChecked(
-                    scctool.settings.config.parser.getboolean("Form", "togglescore"))
+                    scctool.settings.config.parser.getboolean("Form",
+                                                              "togglescore"))
 
                 self.view.cb_autoToggleProduction.setChecked(
-                    scctool.settings.config.parser.getboolean("Form", "toggleprod"))
-
-            self.view.cb_playerIntros.setChecked(
-                scctool.settings.config.parser.getboolean("Form", "playerintros"))
+                    scctool.settings.config.parser.getboolean("Form",
+                                                              "toggleprod"))
 
             self.view.cb_autoTwitch.setChecked(
-                scctool.settings.config.parser.getboolean("Form", "autotwitch"))
+                scctool.settings.config.parser.getboolean("Form",
+                                                          "autotwitch"))
             self.view.cb_autoNightbot.setChecked(
-                scctool.settings.config.parser.getboolean("Form", "autonightbot"))
+                scctool.settings.config.parser.getboolean("Form",
+                                                          "autonightbot"))
 
-            self.view.cb_autoFTP.setChecked(
-                scctool.settings.config.parser.getboolean("FTP", "upload"))
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
 
     def uncheckCB(self, cb):
@@ -298,73 +321,26 @@ class MainController:
         elif(cb == 'nightbot'):
             self.view.cb_autoNightbot.setChecked(False)
 
-    def updateOBS(self):
-        """Update txt-files and ioncs for OBS."""
-        try:
-            self.updateData(False)
-            self.matchData.updateMapIcons()
-            self.matchData.updateScoreIcon()
-            self.matchData.createOBStxtFiles()
-            self.matchData.updateLeagueIcon()
-            self.matchData.writeJsonFile()
-            self.matchData.resetChanged()
-        except Exception as e:
-            module_logger.exception("message")
-
     def allkillUpdate(self):
         """In case of allkill move the winner to the next set."""
-        self.updateData()
-        if(self.matchData.allkillUpdate()):
-            self.updateForms()
+        if(self.matchControl.activeMatch().allkillUpdate()):
+            self.matchControl.activeMatch().updateForms()
 
-    def webAppDone_nightbot(self):
-        """Call to return of nightbot token."""
+    def tokenRecived(self, scope, token):
+        """Call to return of token."""
         try:
-            self.view.mysubwindow1.nightbotToken.setTextMonitored(
-                FlaskThread._single.token_nightbot)
+            subwindow = self.view.mysubwindows['connections']
+            getattr(subwindow, '{}Token'.format(scope)).setTextMonitored(token)
 
             self.view.raise_()
             self.view.show()
             self.view.activateWindow()
 
-            self.view.mysubwindow1.raise_()
-            self.view.mysubwindow1.show()
-            self.view.mysubwindow1.activateWindow()
+            subwindow.raise_()
+            subwindow.show()
+            subwindow.activateWindow()
 
-        except Exception as e:
-            module_logger.exception("message")
-
-    def webAppDone_twitch(self):
-        """Call to return of twitch token."""
-        try:
-            self.view.mysubwindow1.twitchToken.setTextMonitored(
-                FlaskThread._single.token_twitch)
-
-            self.view.raise_()
-            self.view.show()
-            self.view.activateWindow()
-
-            self.view.mysubwindow1.raise_()
-            self.view.mysubwindow1.show()
-            self.view.mysubwindow1.activateWindow()
-
-        except Exception as e:
-            module_logger.exception("message")
-
-    def getNightbotToken(self):
-        """Get nightbot token."""
-        try:
-            self.webApp.start()
-            webbrowser.open("http://localhost:65010/nightbot")
-        except Exception as e:
-            module_logger.exception("message")
-
-    def getTwitchToken(self):
-        """Get twitch token."""
-        try:
-            self.webApp.start()
-            webbrowser.open("http://localhost:65010/twitch")
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
 
     def updateNightbotCommand(self):
@@ -375,14 +351,24 @@ class MainController:
         """Update twitch title."""
         self.autoRequestsThread.activateTask('twitch_once')
 
-    def openURL(self, url):
+    @classmethod
+    def openURL(cls, url):
         """Open URL in Browser."""
         if(len(url) < 5):
-            url = "http://alpha.tl/match/2392"
+            url = "https://teampheenix.github.io/StarCraft-Casting-Tool/"
         try:
             webbrowser.open(url)
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
+
+    @classmethod
+    def open_file(cls, filename):
+        """Open a local file."""
+        if sys.platform == "win32":
+            os.startfile(filename)
+        else:
+            opener = "open" if sys.platform == "darwin" else "xdg-open"
+            subprocess.call([opener, filename])
 
     def runSC2ApiThread(self, task):
         """Start task in thread that monitors SC2-Client-API."""
@@ -392,43 +378,58 @@ class MainController:
             else:
                 self.SC2ApiThread.cancelTerminationRequest(task)
 
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
 
     def stopSC2ApiThread(self, task):
         """Stop task in thread thats monitors SC2-Client-API."""
         try:
             self.SC2ApiThread.requestTermination(task)
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
 
     def runWebsocketThread(self):
-        """Run OBS websocket thread."""
+        """Run websocket thread."""
         if(not self.websocketThread.isRunning()):
             self.websocketThread.start()
         else:
             module_logger.exception("Thread is still running")
 
     def stopWebsocketThread(self):
-        """Stop OBS websocket thread."""
+        """Stop websocket thread."""
         try:
             self.websocketThread.stop()
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
 
-    def cleanUp(self):
+    def cleanUp(self, save=True):
         """Clean up all threads and save config to close program."""
         try:
-            self.SC2ApiThread.requestTermination("ALL")
-            self.webApp.terminate()
-            self.saveConfig()
-            self.ftpUploader.kill()
-            self.websocketThread.stop()
-            self.autoRequestsThread.terminate()
-            scctool.settings.saveNightbotCommands()
             module_logger.info("cleanUp called")
-        except Exception as e:
+            self.SC2ApiThread.requestTermination("ALL")
+            self.authThread.terminate()
+            self.stopWebsocketThread()
+            self.textFilesThread.terminate()
+            self.aligulacThread.terminate()
+            self.autoRequestsThread.terminate()
+            self.mapstatsManager.close(False)
+            self.housekeeper.terminate()
+            if save:
+                self.saveAll()
+        except Exception:
             module_logger.exception("message")
+
+    def saveAll(self):
+        """Save everything."""
+        self.saveConfig()
+        self.matchControl.writeJsonFile()
+        scctool.settings.saveNightbotCommands()
+        self.logoManager.dumpJson()
+        self.historyManager.dumpJson()
+        self.aliasManager.dumpJson()
+        self.aligulacManager.dumpJson()
+        self.mapstatsManager.dumpJson()
+        self.tts.dumpJson()
 
     def saveConfig(self):
         """Save the settings to the config file."""
@@ -439,47 +440,108 @@ class MainController:
                 self.view.cb_autoToggleScore.isChecked()))
             scctool.settings.config.parser.set("Form", "toggleprod", str(
                 self.view.cb_autoToggleProduction.isChecked()))
-            scctool.settings.config.parser.set("Form", "playerintros", str(
-                self.view.cb_playerIntros.isChecked()))
             scctool.settings.config.parser.set("Form", "autotwitch", str(
                 self.view.cb_autoTwitch.isChecked()))
             scctool.settings.config.parser.set("Form", "autonightbot", str(
                 self.view.cb_autoNightbot.isChecked()))
-            scctool.settings.config.parser.set(
-                "FTP", "upload", str(self.view.cb_autoFTP.isChecked()))
 
-            configFile = open(scctool.settings.configFile,
+            configFile = open(scctool.settings.configFile(),
                               'w', encoding='utf-8-sig')
             scctool.settings.config.parser.write(configFile)
             configFile.close()
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
+
+    def setRace(self, team_idx, set_idx, race):
+        """Set the race of a player."""
+        if self.matchControl.activeMatch().setRace(team_idx, set_idx, race):
+            race_idx = scctool.settings.race2idx(race)
+            matchWidget = self.view.matchDataTabWidget.widget(
+                self.matchControl.activeMatchIdx())
+            if race_idx != matchWidget.cb_race[team_idx][set_idx].\
+                    currentIndex():
+                with matchWidget.tlock:
+                    matchWidget.cb_race[team_idx][set_idx].setCurrentIndex(
+                        race_idx)
 
     def requestScoreUpdate(self, newSC2MatchData):
         """Update score based on result of SC2-Client-API."""
         try:
-            self.updateData()
+            alias = self.aliasManager.translatePlayer
             newscore = 0
-            for i in range(self.matchData.getNoSets()):
-                found, newscore = newSC2MatchData.compare_returnScore(
-                    self.matchData.getPlayer(0, i),
-                    self.matchData.getPlayer(1, i))
-                if(found and newscore != 0):
-                    if(self.view.setScore(i, newscore)):
+            matchWidget = self.view.matchDataTabWidget.widget(
+                self.matchControl.activeMatchIdx())
+
+            for j in range(2):
+                self.historyManager.insertPlayer(
+                    alias(newSC2MatchData.getPlayer(j)),
+                    newSC2MatchData.getRace(j))
+            self.view.updateAllPlayerCompleters()
+            if newSC2MatchData.result == 0:
+                return
+            for i in range(self.matchControl.activeMatch().getNoSets()):
+                player1 = self.matchControl.activeMatch().getPlayer(0, i)
+                player2 = self.matchControl.activeMatch().getPlayer(1, i)
+                found, in_order, newscore, _ = \
+                    newSC2MatchData.compare_returnScore(
+                        player1,
+                        player2,
+                        translator=alias)
+                if found:
+                    if(matchWidget.setScore(i, newscore)):
+                        race1 = newSC2MatchData.getRace(0)
+                        race2 = newSC2MatchData.getRace(1)
+                        if not in_order:
+                            race1, race2 = race2, race1
+                        self.setRace(0, i, race1)
+                        self.setRace(1, i, race2)
                         break
                     else:
                         continue
-        except Exception as e:
+            # If not found try again with weak search
+            # and set missing playernames
+            if not found:
+                for i in range(self.matchControl.activeMatch().getNoSets()):
+                    player1 = self.matchControl.activeMatch().getPlayer(0, i)
+                    player2 = self.matchControl.activeMatch().getPlayer(1, i)
+                    found, in_order, newscore, notset_idx \
+                        = newSC2MatchData.compare_returnScore(
+                            player1, player2, weak=True, translator=alias)
+                    if(found and notset_idx in range(2)):
+                        if(matchWidget.setScore(i, newscore, allkill=False)):
+                            race1 = newSC2MatchData.getRace(0)
+                            race2 = newSC2MatchData.getRace(1)
+                            if not in_order:
+                                race1, race2 = race2, race1
+                                player = newSC2MatchData.getPlayer(
+                                    1 - notset_idx)
+                            else:
+                                player = newSC2MatchData.getRace(notset_idx)
+                            self.setRace(0, i, race1)
+                            self.setRace(1, i, race2)
+                            self.matchControl.activeMatch().setPlayer(
+                                notset_idx, i, player)
+                            with matchWidget.tlock:
+                                matchWidget.le_player[notset_idx][i].setText(
+                                    player)
+                            self.allkillUpdate()
+                            break
+                        else:
+                            continue
+
+        except Exception:
             module_logger.exception("message")
 
-    def toggleWidget(self, widget, condition, ttFalse='', ttTrue=''):
+    @classmethod
+    def toggleWidget(cls, widget, condition, ttFalse='', ttTrue=''):
         """Disable or an enable a widget based on a condition."""
-        widget.setAttribute(PyQt5.QtCore.Qt.WA_AlwaysShowToolTips)
-        if condition:
-            tooltip = ttTrue
-        else:
-            tooltip = ttFalse
-        widget.setToolTip(tooltip)
+        widget.setAttribute(Qt.WA_AlwaysShowToolTips)
+        widget.setToolTip(ttTrue if condition else ttFalse)
+        if not condition:
+            try:
+                widget.setChecked(False)
+            except Exception:
+                pass
         widget.setEnabled(condition)
 
     def refreshButtonStatus(self):
@@ -490,7 +552,7 @@ class MainController:
             _('Specify your Twitch Settings to use this feature'),
             '')
 
-        txt = _('Automatically update the title of your' +
+        txt = _('Automatically update the title of your'
                 ' twitch channel in the background.')
         self.toggleWidget(
             self.view.cb_autoTwitch,
@@ -502,7 +564,7 @@ class MainController:
             self.view.cb_autoNightbot,
             scctool.settings.config.nightbotIsValid(),
             _('Specify your Nightbot Settings to use this feature'),
-            _('Automatically update the commands of your' +
+            _('Automatically update the commands of your'
               ' nightbot in the background.'))
 
         self.toggleWidget(
@@ -511,177 +573,280 @@ class MainController:
             _('Specify your Nightbot Settings to use this feature'),
             '')
 
-        self.toggleWidget(
-            self.view.cb_autoFTP,
-            scctool.settings.config.ftpIsValid(),
-            _('Specify your FTP Settings to use this feature'),
-            _('Automatically uploads all streaming data' +
-              ' in the background to a specified FTP server.'))
+        if scctool.settings.windows:
+
+            network_listener = scctool.settings.config.parser.getboolean(
+                "SCT", "sc2_network_listener_enabled")
+
+            self.toggleWidget(
+                self.view.cb_autoToggleScore,
+                not network_listener,
+                _('Not available when SC2 is running on a different PC.'),
+                _('Automatically sets the score of your ingame'
+                  ' UI-interface at the begining of a game.'))
+
+            self.toggleWidget(
+                self.view.cb_autoToggleProduction,
+                not network_listener,
+                _('Not available when SC2 is running on a different PC.'),
+                _('Automatically toggles the production tab of your'
+                  ' ingame UI-interface at the begining of a game.'))
+
+    def requestScoreLogoUpdate(self, data, swap=False):
+        """Request a update of the score logos."""
+        module_logger.info("requestScoreLogoUpdate")
+        match_ident = self.matchControl.activeMatchId()
+        for player_idx in range(2):
+            team1 = data.playerInList(
+                player_idx,
+                self.matchControl.activeMatch().getPlayerList(0),
+                self.aliasManager.translatePlayer)
+            team2 = data.playerInList(
+                player_idx, self.matchControl.activeMatch().getPlayerList(1),
+                self.aliasManager.translatePlayer)
+
+            if swap:
+                path = 'ui_logo_{}'.format(2 - player_idx)
+            else:
+                path = 'ui_logo_{}'.format(player_idx + 1)
+
+            if(not team1 and not team2):
+                logo = ""
+                display = "none"
+            elif(team1):
+                logo = "../" + \
+                    self.logoManager.getTeam1(match_ident).getFile(True)
+                display = "block"
+            elif(team2):
+                logo = "../" + \
+                    self.logoManager.getTeam2(match_ident).getFile(True)
+                display = "block"
+
+            self.websocketThread.sendData2Path(
+                path, 'DATA',
+                {'logo': logo, 'display': display})
 
     def requestToggleScore(self, newSC2MatchData, swap=False):
-        """Check if SC2-Client-API players are present and toggle score accordingly."""
+        """Check if players are present in sc2 api and toggle score."""
         try:
-            self.updateData(False)
+            alias = self.aliasManager.translatePlayer
+            bo = self.matchControl.activeMatch().getBestOf()
 
-            for i in range(self.matchData.getNoSets()):
-                found, order = newSC2MatchData.compare_returnOrder(
-                    self.matchData.getPlayer(0, i),
-                    self.matchData.getPlayer(1, i))
+            for i in range(self.matchControl.activeMatch().getNoSets()):
+                found, inorder = newSC2MatchData.compare_returnOrder(
+                    self.matchControl.activeMatch().getPlayer(0, i),
+                    self.matchControl.activeMatch().getPlayer(1, i),
+                    translator=alias)
+                if found:
+                    break
+            if not found:
+                for i in range(self.matchControl.activeMatch().getNoSets()):
+                    found, inorder = newSC2MatchData.compare_returnOrder(
+                        self.matchControl.activeMatch().getPlayer(0, i),
+                        self.matchControl.activeMatch().getPlayer(1, i),
+                        weak=True,
+                        translator=alias)
+                    if found:
+                        break
+            if found:
+                score = self.matchControl.activeMatch().getScore()
+                if swap:
+                    inorder = not inorder
 
-                if(found):
-                    score = self.matchData.getScore()
-                    if(swap):
-                        order = not order
-
-                    if(order):
-                        ToggleScore(score[0], score[1],
-                                    self.matchData.getBestOf())
+                if inorder:
+                    ToggleScore(score[0], score[1], bo)
+                else:
+                    if scctool.settings.config.parser.getboolean(
+                            "SCT", "CtrlX"):
+                        SwapPlayerNames()
+                        ToggleScore(score[0], score[1], bo)
                     else:
-                        ToggleScore(score[1], score[0],
-                                    self.matchData.getBestOf())
+                        ToggleScore(score[1], score[0], bo)
 
-                    return
+            else:
+                ToggleScore(0, 0, bo)
 
-            ToggleScore(0, 0, self.matchData.getBestOf())
-
-        except Exception as e:
+        except Exception:
             module_logger.exception("message")
 
-    def linkFile(self, file):
+    @classmethod
+    def linkFile(cls, file):
         """Return correct img file ending."""
-        for ext in [".jpg", ".png"]:
+        for ext in [".jpg", ".jpeg", ".png"]:
             if(os.path.isfile(scctool.settings.getAbsPath(file + ext))):
                 return file + ext
         return ""
 
-    def updateLogosHTML(self):
-        """Update html files with team logos."""
+    def updateLogosWebsocket(self):
+        """Update logos in browser sources via websocket."""
+        match_ident = self.matchControl.activeMatchId()
         for idx in range(2):
-            filename = scctool.settings.OBShtmlDir +\
-                "/data/logo" + str(idx + 1) + "-data.html"
-            filename = scctool.settings.getAbsPath(filename)
-            template = scctool.settings.getAbsPath(
-                scctool.settings.OBShtmlDir + "/data/logo-template.html")
-            with open(template, "rt", encoding='utf-8-sig') as fin:
-                logo = self.linkFile(
-                    scctool.settings.OBSdataDir + "/" + "logo" + str(idx + 1))
-                if logo == "":
-                    logo = scctool.settings.OBShtmlDir + "/src/SC2.png"
-                with open(filename, "wt", encoding='utf-8-sig') as fout:
-                    for line in fin:
-                        line = line.replace('%LOGO%', logo)
-                        fout.write(line)
+            logo = self.logoManager.getTeam(idx + 1, match_ident)
+            self.websocketThread.sendData2Path(
+                'logo_{}'.format(idx + 1), 'DATA',
+                {'logo': logo.getFile(True)})
 
-        self.ftpUploader.cwd(scctool.settings.OBShtmlDir)
-
-        for file in ["logo1-data.html", "logo2-data.html"]:
-            self.ftpUploader.upload(
-                scctool.settings.OBShtmlDir + "/data/" + file, file)
-
-        self.ftpUploader.cwd("..")
+            self.websocketThread.sendData2Path(
+                'score', 'CHANGE_IMAGE',
+                {'id': 'logo{}'.format(idx + 1),
+                 'img': logo.getFile(True)})
 
     def updateHotkeys(self):
         """Refresh hotkeys."""
         if(self.websocketThread.isRunning()):
-            self.websocketThread.unregister_hotkeys()
+            self.websocketThread.unregister_hotkeys(force=True)
             self.websocketThread.register_hotkeys()
 
+    def updatePlayerIntroIdx(self):
+        """Alternate between player intros."""
+        self.__playerIntroIdx = (self.__playerIntroIdx + 1) % 2
+
     def initPlayerIntroData(self):
-        """Initalize player intro data."""
+        """Init player intro data."""
         self.__playerIntroData = dict()
+        self.__playerIntroIdx = 0
         for player_idx in range(2):
             data = dict()
-            data['name'] = ""
-            data['race'] = "random"
-            data['logo'] = ""
-            data['team'] = ""
-            data['display'] = "none"
+            data['name'] = "pressure"
+            data['race'] = "protoss"
+            data['logo'] = "../" + self.logoManager.newLogo().getFile(True)
+            data['team'] = "team pheeniX"
+            data['display'] = "block"
             self.__playerIntroData[player_idx] = data
 
     def getPlayerIntroData(self, idx):
         """Return player intro."""
+        if idx == -1:
+            idx = self.__playerIntroIdx
         data = self.__playerIntroData[idx]
         data['volume'] = scctool.settings.config.parser.getint(
             "Intros", "sound_volume")
+        data['tts_volume'] = scctool.settings.config.parser.getint(
+            "Intros", "tts_volume")
         data['display_time'] = scctool.settings.config.parser.getfloat(
             "Intros", "display_time")
+        data['animation'] = scctool.settings.config.parser.get(
+            "Intros", "animation") .strip().lower()
+        if scctool.settings.config.parser.getboolean(
+                "Style", "use_custom_font"):
+            data['font'] = scctool.settings.config.parser.get(
+                "Style", "custom_font")
         return data
 
     def updatePlayerIntros(self, newData):
         """Update player intro files."""
         module_logger.info("updatePlayerIntros")
-        self.updateData(False)
+
+        tts_active = scctool.settings.config.parser.getboolean(
+            "Intros", "tts_active")
+        tts_voice = scctool.settings.config.parser.get(
+            "Intros", "tts_voice")
+        tts_scope = scctool.settings.config.parser.get(
+            "Intros", "tts_scope")
+        tts_pitch = scctool.settings.config.parser.getfloat(
+            "Intros", "tts_pitch")
+        tts_rate = scctool.settings.config.parser.getfloat(
+            "Intros", "tts_rate")
+
+        matchID = self.matchControl.activeMatchId()
 
         for player_idx in range(2):
             team1 = newData.playerInList(
-                player_idx, self.matchData.getPlayerList(0))
+                player_idx,
+                self.matchControl.activeMatch().getPlayerList(0),
+                self.aliasManager.translatePlayer)
             team2 = newData.playerInList(
-                player_idx, self.matchData.getPlayerList(1))
+                player_idx,
+                self.matchControl.activeMatch().getPlayerList(1),
+                self.aliasManager.translatePlayer)
 
-            if((team1 and team2) or not (team1 or team2)):
+            if(not team1 and not team2):
                 team = ""
                 logo = ""
                 display = "none"
             elif(team1):
-                team = self.matchData.getTeam(0)
-                logo = self.linkFile(
-                    scctool.settings.OBSdataDir + "/" + "logo1")
+                team = self.matchControl.activeMatch().getTeam(0)
+                logo = "../" + self.logoManager.getTeam1(matchID).getFile(True)
                 display = "block"
             elif(team2):
-                team = self.matchData.getTeam(1)
-                logo = self.linkFile(
-                    scctool.settings.OBSdataDir + "/" + "logo2")
+                team = self.matchControl.activeMatch().getTeam(1)
+                logo = "../" + self.logoManager.getTeam2(matchID).getFile(True)
                 display = "block"
 
-            if logo == "":
-                logo = scctool.settings.OBShtmlDir + "/src/SC2.png"
-
-            self.__playerIntroData[player_idx]['name'] = newData.getPlayer(
-                player_idx)
+            name = self.aliasManager.translatePlayer(
+                newData.getPlayer(player_idx))
+            race = newData.getRace(player_idx)
+            self.__playerIntroData[player_idx]['name'] = name
             self.__playerIntroData[player_idx]['team'] = team
-            self.__playerIntroData[player_idx]['race'] = newData.getPlayerRace(
-                player_idx).lower()
-            self.__playerIntroData[player_idx]['logo'] = "../" + logo
+            self.__playerIntroData[player_idx]['race'] = race.lower()
+            self.__playerIntroData[player_idx]['logo'] = logo
             self.__playerIntroData[player_idx]['display'] = display
+            self.__playerIntroIdx = 0
 
-    def getMapImg(self, map, fullpath=False):
+            try:
+                if tts_active:
+                    if team.strip().lower() == 'tbd':
+                        team = ''
+                    text = self.tts.getLine(tts_scope, name, race, team)
+                    tts_file = os.path.join("..", self.tts.synthesize(
+                        text, tts_voice,
+                        tts_pitch, tts_rate)).replace('\\', '/')
+                else:
+                    tts_file = None
+                self.__playerIntroData[player_idx]['tts'] = tts_file
+
+            except Exception:
+                self.__playerIntroData[player_idx]['tts'] = None
+                module_logger.exception("message")
+
+    def getMapImg(self, mapname, fullpath=False):
         """Get map image from map name."""
-        mapdir = scctool.settings.getAbsPath(scctool.settings.OBSmapDir)
+        if mapname == 'TBD':
+            return mapname
+        mapdir = scctool.settings.getAbsPath(
+            scctool.settings.casting_html_dir)
         mapimg = os.path.normpath(os.path.join(
-            mapdir, "src/maps", map.replace(" ", "_")))
+            mapdir, "src/img/maps", mapname.replace(" ", "_")))
         mapimg = os.path.basename(self.linkFile(mapimg))
         if not mapimg:
-            mapimg = "TBD.jpg"
-            self.displayWarning(_("Warning: Map '{}' not found!").format(map))
+            mapimg = "TBD"
+            self.displayWarning(
+                _("Warning: Map '{}' not found!").format(mapname))
 
         if(fullpath):
-            return mapdir + "/src/maps/" + mapimg
+            return os.path.normpath(os.path.join(
+                mapdir, "src/img/maps", mapimg))
         else:
             return mapimg
 
-    def addMap(self, file, mapname):
+    @classmethod
+    def addMap(cls, file, mapname):
         """Add a new map via file and name."""
-        _, ext = os.path.splitext(file)
-        mapdir = scctool.settings.getAbsPath(scctool.settings.OBSmapDir)
-        map = mapname.strip().replace(" ", "_") + ext.lower()
-        newfile = os.path.normpath(os.path.join(mapdir, "src/maps", map))
+        __, ext = os.path.splitext(file)
+        mapdir = scctool.settings.getAbsPath(
+            scctool.settings.casting_html_dir)
+        mapname = mapname.strip()
+        sc2map = mapname.replace(" ", "_") + ext.lower()
+        newfile = os.path.normpath(
+            os.path.join(mapdir, "src/img/maps", sc2map))
         shutil.copy(file, newfile)
         if mapname not in scctool.settings.maps:
             scctool.settings.maps.append(mapname)
 
-        self.ftpUploader.cwd(scctool.settings.OBSmapDir + "/src/maps")
-        self.ftpUploader.upload(newfile, self.getMapImg(mapname))
-        self.ftpUploader.cwd("../../..")
-
-    def deleteMap(self, map):
+    def deleteMap(self, mapname):
         """Delete map and file."""
-        mapdir = scctool.settings.getAbsPath(scctool.settings.OBSmapDir)
-        self.ftpUploader.cwd(mapdir + "/src/maps")
-        self.ftpUploader.delete(self.getMapImg(map))
-        self.ftpUploader.cwd("../../..")
+        os.remove(self.getMapImg(mapname, True))
+        scctool.settings.maps.remove(mapname)
 
-        os.remove(self.getMapImg(map, True))
-        scctool.settings.maps.remove(map)
+    def swapTeams(self):
+        """Swap teams from left to right."""
+        with self.view.tlock:
+            self.logoManager.swapTeamLogos(self.matchControl.selectedMatchId())
+            self.matchControl.selectedMatch().swapTeams()
+            idx = self.matchControl.selectedMatchIdx()
+            matchWidget = self.view.matchDataTabWidget.widget(idx)
+            matchWidget.updateForms()
+            matchWidget.updateLogos(False)
 
     def displayWarning(self, msg="Warning: Something went wrong..."):
         """Display a warning in status bar."""
@@ -692,31 +857,274 @@ class MainController:
     def resetWarning(self):
         """Display or reset warning now."""
         warning = self._warning
-        # print(str(warning))
         self._warning = False
         return warning
+
+    def showMap(self, player_idx):
+        """Show a specific map on the mapstats browser source."""
+        self.mapstatsManager.selectMap(
+            self.matchControl.activeMatch().getMap(player_idx))
+
+    def getBrowserSourceURL(self, file, external=False):
+        """Return the URL of a browser source."""
+        file = file.replace('\\', '/')
+        file = file.replace('.html', '')
+        if external and self._my_ip:
+            ip = self._my_ip
+        else:
+            ip = 'localhost'
+        return f'http://{ip}:{self.websocketThread.get_port()}/{file}'
+
+    def toogleLEDs(self, num, path, view=None):
+        """Indicate when browser sources are connected."""
+        if not view:
+            view = self.view
+        view.leds[path].setChecked(num > 0)
+        name = path.replace('_', ' ').title()
+        port = self.websocketThread.get_port()
+        view.leds[path].setToolTip(
+            _("{} {} Browser Source(s) connected on port {}.").format(
+                num, name, port))
+        if path == 'intro':
+            if num > 0:
+                self.runSC2ApiThread("playerIntros")
+            else:
+                self.stopSC2ApiThread("playerIntros")
+        if path == 'ui_logo':
+            if num > 0:
+                self.runSC2ApiThread("playerLogos")
+            else:
+                self.stopSC2ApiThread("playerLogos")
+        if path == 'aligulac':
+            if num > 0:
+                self.aligulacThread.activate()
+                self.aligulacThread.receive_data('meta')
+                # view.toogleAligulacTab(True)
+            else:
+                self.aligulacThread.terminate()
+                # view.toogleAligulacTab(False)
+
+    def autoSetNextMap(self, idx=-1, send=True):
+        """Select the next map to be shown on the mapstats browser source."""
+        if scctool.settings.config.parser.getboolean(
+                "Mapstats", "autoset_next_map"):
+            self.mapstatsManager.selectMap(
+                self.matchControl.activeMatch().getNextMap(idx), send)
+
+    def matchMetaDataChanged(self):
+        """Send new data to all browser sources triggered by a meta change."""
+        data = self.matchControl.activeMatch().getScoreData()
+        self.websocketThread.sendData2Path("score", "ALL_DATA", data)
+        data = self.matchControl.activeMatch().getMapIconsData()
+
+        for boxtype in ['box', 'landscape']:
+            for idx in range(0, 3):
+                path = f'mapicons_{boxtype}_{idx + 1}'
+                scope = f'scope_{boxtype}_{idx + 1}'
+                scope = scctool.settings.config.parser.get("MapIcons", scope)
+                if not self.matchControl.activeMatch().isValidScope(scope):
+                    scope = 'all'
+                processedData = dict()
+                self.websocketThread.mapicon_sets[path] = set()
+                for idx in self.matchControl.activeMatch().parseScope(scope):
+                    processedData[idx + 1] = data[idx + 1]
+                    self.websocketThread.mapicon_sets[path].add(idx + 1)
+                self.websocketThread.sendData2Path(path,
+                                                   'DATA',
+                                                   processedData)
+        data = self.matchControl.activeMatch().getVetoData()
+        self.websocketThread.sendData2Path('vetoes', "DATA", data)
+
+    def handleTeamChange(self, obj):
+        if not self.matchControl.activeMatch().getSolo():
+            self.websocketThread.sendData2Path(
+                'score', 'CHANGE_TEXT',
+                {'id': 'team{}'.format(obj['idx'] + 1),
+                 'text': obj['value']})
+
+    def handleBoChange(self, obj):
+        self.websocketThread.sendData2Path(
+            'score', 'CHANGE_TEXT', {
+                'id': 'bestof',
+                'text': f"{obj['value']}"})
+
+    def handleScoreChange(self, obj):
+        score = self.matchControl.activeMatch().getScore()
+        for idx in range(0, 2):
+            self.websocketThread.sendData2Path(
+                'score', 'CHANGE_TEXT', {
+                    'id': 'score{}'.format(idx + 1),
+                    'text': str(score[idx])})
+            color = self.matchControl.activeMatch().getScoreIconColor(
+                idx, obj['set_idx'])
+            self.websocketThread.sendData2Path(
+                'score', 'CHANGE_SCORE', {
+                    'teamid': idx + 1,
+                    'setid': obj['set_idx'] + 1,
+                    'color': color})
+        colorData = self.matchControl.activeMatch(
+        ).getColorData(obj['set_idx'])
+        self.websocketThread.sendData2Path(
+            ['mapicons_box', 'mapicons_landscape'],
+            'CHANGE_SCORE', {
+                'winner': obj['value'],
+                'setid': obj['set_idx'] + 1,
+                'score_color': colorData['score_color'],
+                'border_color': colorData['border_color'],
+                'hide': colorData['hide'],
+                'opacity': colorData['opacity']})
+        if scctool.settings.config.parser.getboolean(
+                "Mapstats", "mark_played",):
+            sc2_map = self.matchControl.activeMatch().getMap(
+                obj['set_idx'])
+            played = obj['value'] != 0
+            self.websocketThread.sendData2Path(
+                'mapstats', 'MARK_PLAYED',
+                {'map': sc2_map, 'played': played})
+
+    def handleVetoChange(self, obj):
+        if scctool.settings.config.parser.getboolean(
+                "Mapstats", "mark_vetoed",):
+            sc2_map = obj.get('map')
+            old_map = obj.get('old_map')
+            if(old_map != sc2_map
+               and old_map != 'TBD'
+               and not self.matchControl.activeMatch().isMapVetoed(
+                   old_map)):
+                self.websocketThread.sendData2Path(
+                    'mapstats', 'MARK_VETOED',
+                    {'map': old_map, 'vetoed': False})
+            if sc2_map.lower() != 'tbd':
+                self.websocketThread.sendData2Path(
+                    'mapstats', 'MARK_VETOED',
+                    {'map': sc2_map, 'vetoed': True})
+        self.websocketThread.sendData2Path(
+            'vetoes', "VETO",
+            {'idx': obj['idx'],
+             'map_name': obj['map'],
+             'map_img': self.getMapImg(obj['map']),
+             'team': obj['team']
+             })
+
+    def handleColorChange(self, obj):
+        for idx in range(0, 2):
+            self.websocketThread.sendData2Path(
+                'score', 'CHANGE_SCORE', {
+                    'teamid': idx + 1,
+                    'setid': obj['set_idx'] + 1,
+                    'color': obj['score_color']})
+        self.websocketThread.sendData2Path(
+            ['mapicons_box', 'mapicons_landscape'],
+            'CHANGE_SCORE', {
+                'winner': 0,
+                'setid': obj['set_idx'] + 1,
+                'score_color': obj['score_color'],
+                'border_color': obj['border_color'],
+                'hide': obj['hide'],
+                'opacity': obj['opacity']})
+
+    def handleColorDataChange(self, obj):
+        self.websocketThread.sendData2Path(
+            ['mapicons_box', 'mapicons_landscape'], 'CHANGE_SCORE', {
+                'winner': obj['score'],
+                'setid': obj['set_idx'] + 1,
+                'score_color': obj['score_color'],
+                'border_color': obj['border_color'],
+                'hide': obj['hide'],
+                'opacity': obj['opacity']})
+
+    def handlePlayerChange(self, obj):
+        self.websocketThread.sendData2Path(
+            ['mapicons_box', 'mapicons_landscape'],
+            'CHANGE_TEXT', {
+                'icon': obj['set_idx'] + 1,
+                'label': 'player{}'.format(obj['team_idx'] + 1),
+                'text': obj['value']})
+        if(obj['set_idx'] == 0
+                and self.matchControl.activeMatch().getSolo()):
+            self.websocketThread.sendData2Path(
+                'score', 'CHANGE_TEXT',
+                {'id': 'team{}'.format(obj['team_idx'] + 1),
+                 'text': obj['value']})
+
+    def handleRaceChange(self, obj):
+        self.websocketThread.sendData2Path(
+            ['mapicons_box', 'mapicons_landscape'],
+            'CHANGE_RACE', {
+                'icon': obj['set_idx'] + 1,
+                'team': obj['team_idx'] + 1,
+                'race': obj['value'].lower()})
+
+    def handleMapChange(self, obj):
+        self.websocketThread.sendData2Path(
+            ['mapicons_box', 'mapicons_landscape'],
+            'CHANGE_MAP', {
+                'icon': obj['set_idx'] + 1,
+                'map': obj['value'],
+                'map_img': self.getMapImg(obj['value'])})
+
+    def handleMatchDataChange(self, label, obj):
+        """Send new data to browser sources due to a change of the map data."""
+        if label == 'team':
+            self.handleTeamChange(obj)
+        elif label == 'bestof':
+            self.handleBoChange(obj)
+        elif label == 'score':
+            self.handleScoreChange(obj)
+        elif label == 'map_veto':
+            self.handleVetoChange(obj)
+        elif label == 'color':
+            self.handleColorChange(obj)
+        elif label == 'color-data':
+            self.handleColorDataChange(obj)
+        elif label == 'outcome':
+            self.websocketThread.sendData2Path('score', 'SET_WINNER', obj)
+        elif label == 'player':
+            self.handlePlayerChange(obj)
+        elif label == 'race':
+            self.handleRaceChange(obj)
+        elif label == 'map':
+            self.handleMapChange(obj)
+
+        data = self.matchControl.activeMatch().getMapIconsData()
+        for icon_type in ['box', 'landscape']:
+            for idx in range(0, 3):
+                path = f'mapicons_{icon_type}_{idx + 1}'
+                if len(self.websocketThread.connected.get(path, set())) > 0:
+                    processedData = dict()
+                    for set_idx in \
+                            self.websocketThread.compareMapIconSets(path):
+                        processedData[set_idx] = data[set_idx]
+                    if(len(processedData) > 0):
+                        self.websocketThread.sendData2Path(path,
+                                                           'DATA',
+                                                           processedData)
+
+    def update_ip(self, ip):
+        """Save the current external ip."""
+        self._my_ip = ip
 
     def newVersion(self, version, force=False):
         """Display dialog for new version."""
         prompt = force or scctool.settings.config.parser.getboolean(
             "SCT", "new_version_prompt")
         if hasattr(sys, "frozen") and prompt:
-            messagebox = PyQt5.QtWidgets.QMessageBox()
+            messagebox = QMessageBox()
             text = _("A new version {} is available.")
             messagebox.setText(text.format(version))
             messagebox.setInformativeText(_("Update to new version?"))
-            messagebox.setWindowTitle(_("New SCC-Tool Version"))
+            messagebox.setWindowTitle(_("New StarCraft Casting Tool Version"))
             messagebox.setStandardButtons(
-                PyQt5.QtWidgets.QMessageBox.Yes | PyQt5.QtWidgets.QMessageBox.No)
-            messagebox.setDefaultButton(PyQt5.QtWidgets.QMessageBox.Yes)
-            messagebox.setIcon(PyQt5.QtWidgets.QMessageBox.Information)
-            messagebox.setWindowModality(PyQt5.QtCore.Qt.ApplicationModal)
-            cb = PyQt5.QtWidgets.QCheckBox()
+                QMessageBox.Yes | QMessageBox.No)
+            messagebox.setDefaultButton(QMessageBox.Yes)
+            messagebox.setIcon(QMessageBox.Information)
+            messagebox.setWindowModality(Qt.ApplicationModal)
+            cb = QCheckBox()
             cb.setChecked(not scctool.settings.config.parser.getboolean(
                 "SCT", "new_version_prompt"))
             cb.setText(_("Don't show on startup."))
             messagebox.setCheckBox(cb)
-            if messagebox.exec_() == PyQt5.QtWidgets.QMessageBox.Yes:
+            if messagebox.exec_() == QMessageBox.Yes:
                 ToolUpdater(self, self.view)
             scctool.settings.config.parser.set("SCT",
                                                "new_version_prompt",

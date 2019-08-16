@@ -1,8 +1,11 @@
 """Define placeholders."""
 import logging
 
+import scctool.settings.translation
+
 # create logger
-module_logger = logging.getLogger('scctool.placeholders')
+module_logger = logging.getLogger(__name__)
+_ = scctool.settings.translation.gettext
 
 
 class PlaceholderList:
